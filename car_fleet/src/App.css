@@ -1,0 +1,162 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Orbitron:wght@500;600;700;800&display=swap');
+
+:root {
+  /* Base: near-black through elevated surfaces */
+  --bg: #08090b;
+  --surface: #0e1013;
+  --surface-2: #14171b;
+  --raised: #1b1f24;
+
+  /* Red ramp */
+  --red: #ff2d33;
+  --red-bright: #ff5b57;
+  --red-dim: #b3161d;
+  --red-deep: #6b0d12;
+  --red-glow: rgba(255, 45, 51, .55);
+  --red-wash: rgba(255, 45, 51, .09);
+
+  /* Neutrals */
+  --text: #f4f5f7;
+  --text-2: #a8adb6;
+  --text-3: #6c727c;
+  --line: rgba(255, 255, 255, .09);
+  --line-hot: rgba(255, 45, 51, .32);
+
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+}
+
+* { box-sizing: border-box; }
+button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; }
+h1, h2, h3, h4, p { margin-top: 0; }
+
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  color: var(--text);
+  background:
+    radial-gradient(1100px 620px at 12% -10%, rgba(255, 45, 51, .10), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(255, 45, 51, .05), transparent 55%),
+    var(--bg);
+}
+
+/* Faint scan texture over the whole shell */
+.app-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom, transparent 0 3px, rgba(255, 255, 255, .012) 3px 4px);
+}
+
+.workspace {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 1560px;
+  margin: 0 auto;
+  flex: 1;
+  min-width: 0;
+  padding: 20px 30px 32px;
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr);
+  gap: 16px;
+  align-items: start;
+}
+.dashboard-main { display: grid; gap: 16px; min-width: 0; align-content: start; }
+
+.panel, .metric-card {
+  position: relative;
+  border: 1px solid var(--line);
+  background: linear-gradient(168deg, var(--surface-2), var(--surface));
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .04);
+}
+.panel { border-radius: var(--r-md); }
+
+/* Corner ticks — the futuristic HUD frame */
+.panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--red), var(--red)) 0 0 / 12px 1px no-repeat,
+    linear-gradient(var(--red), var(--red)) 0 0 / 1px 12px no-repeat,
+    linear-gradient(var(--red), var(--red)) 100% 100% / 12px 1px no-repeat,
+    linear-gradient(var(--red), var(--red)) 100% 100% / 1px 12px no-repeat;
+  opacity: .5;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: var(--text-3);
+  font: 700 9px/1.2 Orbitron, sans-serif;
+  letter-spacing: 1.3px;
+}
+.eyebrow span, .accent-text { color: var(--red); }
+
+/* ---- shared animation primitives ---- */
+@keyframes flicker { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes ping { 0% { transform: scale(.85); opacity: .9; } 70%, 100% { transform: scale(1.5); opacity: 0; } }
+
+/* Stagger the panels in on load */
+.fleet-panel, .dashboard-main > *, .dashboard-side > * { animation: rise .5s var(--ease) both; }
+.fleet-panel { animation-delay: .04s; }
+.dashboard-main > *:nth-child(1) { animation-delay: .10s; }
+.dashboard-main > *:nth-child(2) { animation-delay: .16s; }
+.dashboard-side > *:nth-child(1) { animation-delay: .13s; }
+.dashboard-side > *:nth-child(2) { animation-delay: .19s; }
+
+/* Shared status chip */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--red);
+  font: 700 8px Orbitron, sans-serif;
+  letter-spacing: .6px;
+  white-space: nowrap;
+}
+.status i, .live-pill i {
+  position: relative;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.status i::after, .live-pill i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: currentColor;
+  animation: ping 1.9s ease-out infinite;
+}
+.status.parked { color: var(--text-3); }
+.status.parked i::after { animation: none; }
+.status.charging { color: var(--red-bright); }
+
+@media (max-width: 1100px) { .workspace { padding: 18px 20px 28px; } }
+@media (max-width: 980px) { .dashboard-grid { grid-template-columns: 1fr; } }
+@media (max-width: 590px) {
+  .workspace { padding: 14px 14px 24px; gap: 12px; }
+  .dashboard-grid { gap: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+.dashboard-side { display: grid; gap: 16px; min-width: 0; align-content: start; }

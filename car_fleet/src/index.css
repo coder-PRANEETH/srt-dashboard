@@ -1,0 +1,12 @@
+html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
+body {
+  font-family: Manrope, system-ui, Arial, sans-serif;
+  background: #08090b;
+  color: #f4f5f7;
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: #ff2d33; color: #fff; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: #08090b; }
+::-webkit-scrollbar-thumb { background: #1b1f24; border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: #b3161d; }
