@@ -18,21 +18,23 @@ function VehicleCard({ vehicle, selected, onSelect }) {
       </div>
       <div className="vehicle-meta">
         <span className={`status ${getStatusClass(vehicle.status)}`}><i />{vehicle.status}</span>
-        <strong className={vehicle.charge <= 30 ? 'low' : ''}><Icon name="bolt" size={13} />{vehicle.charge}%</strong>
+        <strong className={vehicle.charge <= 30 ? 'low' : ''}><Icon name="bolt" size={16} />{vehicle.charge}%</strong>
       </div>
       <div className="charge-track"><i style={{ width: `${vehicle.charge}%` }} /></div>
     </div>
   </button>
 }
 
-export default function FleetPanel({ fleet, activeId, onSelect }) {
+export default function FleetPanel({ fleet, activeId, onSelect, onClose }) {
   return <div className="fleet-panel panel">
     <div className="panel-heading">
       <div>
         <p className="eyebrow">ACTIVE ASSETS</p>
         <h2>My Fleet <span>{fleet.length} vehicles</span></h2>
       </div>
-      <button className="mini-button" type="button" aria-label="Fleet options"><Icon name="dots" /></button>
+      <button className="mini-button" type="button" onClick={onClose} aria-label="Close fleet selector">
+        <Icon name="close" size={18} />
+      </button>
     </div>
 
     <div className="vehicle-list">
@@ -44,6 +46,6 @@ export default function FleetPanel({ fleet, activeId, onSelect }) {
       />)}
     </div>
 
-    <button className="view-all" type="button">VIEW ALL VEHICLES <Icon name="arrow" size={15} /></button>
+    <button className="view-all" type="button">VIEW ALL VEHICLES <Icon name="arrow" size={17} /></button>
   </div>
 }

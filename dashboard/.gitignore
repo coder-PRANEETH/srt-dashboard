@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Offline map tiles - regenerate with tools/download-tiles.py.
+# Licensed provider data; not ours to redistribute, and ~5 MB of binaries.
+public/tiles

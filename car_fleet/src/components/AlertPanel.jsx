@@ -15,7 +15,7 @@ export default function AlertPanel({ alerts, car }) {
       {alerts.length === 0
         ? <p className="alert-empty">All systems nominal for {car.id}. No open warnings.</p>
         : alerts.map((alert) => <article className={`alert-item ${alert.level.toLowerCase()}`} key={alert.id}>
-            <Icon name="warning" size={16} />
+            <Icon name="warning" size={20} />
             <div><b>{alert.title}</b><p>{alert.detail}</p></div>
             <time>{alert.time}</time>
           </article>)}

@@ -1,27 +1,28 @@
-.fleet-panel { padding: 18px 16px 16px; }
+.fleet-panel { padding: 4px 2px; }
 
 .panel-heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding-bottom: 14px;
+  padding-bottom: 16px;
 }
 .panel-heading h2 {
   margin: 0;
-  font: 800 15px Orbitron, sans-serif;
+  font: 800 20px Orbitron, sans-serif;
   letter-spacing: -.3px;
 }
 .panel-heading h2 span {
-  font: 600 10px Manrope, sans-serif;
+  display: block;
+  margin-top: 4px;
+  font: 600 13px Manrope, sans-serif;
   color: var(--text-3);
-  margin-left: 6px;
   letter-spacing: 0;
 }
 
 .mini-button {
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   flex: none;
   border-radius: var(--r-sm);
   display: grid;
@@ -31,53 +32,51 @@
 }
 .mini-button:hover { color: var(--red); background: var(--raised); }
 
+/* Sidebar rail: one vehicle per row, stacked */
 .vehicle-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
-  gap: 10px;
+  grid-template-columns: 1fr;
+  gap: 0;
+  border-top: 1px solid var(--line);
 }
 
 .vehicle {
   position: relative;
   width: 100%;
   min-width: 0;
-  padding: 11px;
+  padding: 14px 12px;
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 13px;
   text-align: left;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  background: var(--surface);
-  overflow: hidden;
-  transition: border-color .22s var(--ease), background .22s var(--ease), transform .22s var(--ease);
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  transition: background .22s var(--ease), border-color .22s var(--ease);
 }
-.vehicle:hover { transform: translateY(-2px); border-color: var(--line-hot); background: var(--surface-2); }
+.vehicle + .vehicle { border-top: 1px solid var(--line); }
+.vehicle:hover { background: var(--surface-2); }
 .vehicle:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
 
 .vehicle.selected {
-  border-color: var(--red);
-  background: linear-gradient(100deg, var(--red-wash), transparent 70%);
-  box-shadow: inset 2px 0 var(--red);
+  border-left-color: var(--red);
+  background: var(--red-wash);
 }
 
 /* Abstract car silhouette built from CSS only */
 .car-visual {
   position: relative;
-  width: 54px;
-  height: 38px;
+  width: 58px;
+  height: 42px;
   flex: none;
-  border-radius: var(--r-sm);
   overflow: hidden;
-  background: radial-gradient(60% 80% at 50% 100%, rgba(255, 45, 51, .18), transparent 70%), #0a0c0e;
-  border: 1px solid var(--line);
 }
 .car-body {
   position: absolute;
-  left: 11px;
-  top: 14px;
-  width: 32px;
-  height: 13px;
+  left: 12px;
+  top: 15px;
+  width: 34px;
+  height: 14px;
   border: 2px solid var(--red-dim);
   border-radius: 12px 15px 4px 4px;
   transition: border-color .22s var(--ease);
@@ -90,18 +89,18 @@
 .car-trail {
   position: absolute;
   left: 0;
-  bottom: 9px;
-  width: 16px;
-  height: 1px;
+  bottom: 10px;
+  width: 17px;
+  height: 2px;
   background: linear-gradient(90deg, transparent, var(--red));
   opacity: 0;
 }
 .vehicle.selected .car-trail { opacity: 1; }
 
 .vehicle-info { min-width: 0; flex: 1; }
-.vehicle-name { display: grid; gap: 2px; }
+.vehicle-name { display: grid; gap: 3px; }
 .vehicle-name b {
-  font: 700 12px Orbitron, sans-serif;
+  font: 700 16px Orbitron, sans-serif;
   letter-spacing: -.2px;
   display: block;
   overflow: hidden;
@@ -109,7 +108,7 @@
   white-space: nowrap;
 }
 .vehicle-name span {
-  font-size: 9px;
+  font-size: 13px;
   color: var(--text-3);
   display: block;
   overflow: hidden;
@@ -122,21 +121,21 @@
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  margin-top: 7px;
+  margin-top: 9px;
 }
 .vehicle-meta strong {
   display: flex;
-  gap: 3px;
+  gap: 4px;
   align-items: center;
-  font: 700 11px Orbitron, sans-serif;
+  font: 700 14px Orbitron, sans-serif;
   color: var(--text-2);
 }
 .vehicle-meta strong svg { color: var(--text-3); }
 .vehicle-meta strong.low, .vehicle-meta strong.low svg { color: var(--red); }
 
 .charge-track {
-  margin-top: 7px;
-  height: 3px;
+  margin-top: 9px;
+  height: 5px;
   border-radius: 3px;
   background: var(--raised);
   overflow: hidden;
@@ -145,19 +144,19 @@
   display: block;
   height: 100%;
   border-radius: 3px;
-  background: linear-gradient(90deg, var(--red-deep), var(--red));
+  background: linear-gradient(90deg, var(--red-dim), var(--red));
   transition: width .6s var(--ease);
 }
 
 .view-all {
-  margin-top: 12px;
+  margin-top: 18px;
   width: 100%;
-  background: var(--surface);
-  border: 1px solid var(--line-hot);
-  border-radius: var(--r-sm);
-  padding: 11px;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  padding: 16px 0 6px;
   color: var(--red);
-  font: 700 9px Orbitron, sans-serif;
+  font: 700 12px Orbitron, sans-serif;
   letter-spacing: .8px;
   display: flex;
   justify-content: center;
@@ -166,7 +165,8 @@
   transition: background .2s var(--ease);
 }
 .view-all svg { transition: transform .25s var(--ease); }
-.view-all:hover { background: var(--red-wash); }
+.view-all:hover { color: var(--red-dim); }
 .view-all:hover svg { transform: translateX(4px); }
 
-@media (max-width: 520px) { .vehicle-list { grid-template-columns: 1fr; } }
+/* Inside the drawer the list is always a single stacked column */
+.fleet-panel { height: 100%; }

@@ -6,11 +6,6 @@ const ECO_LIMIT = 60
 const TEMP_MIN = 15
 const TEMP_MAX = 45
 
-const driveModes = [
-  { name: 'ECO MODE', range: `0–${ECO_LIMIT} KM/H`, key: 'eco' },
-  { name: 'POWER MODE', range: `${ECO_LIMIT + 1}–${MAX_SPEED} KM/H`, key: 'power' },
-]
-
 /* Gauge arc: r=45 → circumference ≈ 283. We draw a 270° arc (0.75 of it). */
 const RADIUS = 45
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS
@@ -44,18 +39,9 @@ function SpeedGauge({ speed }) {
 }
 
 function DriveModes({ speed }) {
-  const activeMode = speed <= ECO_LIMIT ? 'eco' : 'power'
+  const activeMode = speed <= ECO_LIMIT ? 'ECO' : 'POWER'
 
-  return <div className="drive-modes" aria-label={`Drive mode: ${activeMode}`}>
-    {driveModes.map((mode) => <div
-      className={`drive-mode ${mode.key} ${mode.key === activeMode ? 'active' : ''}`}
-      key={mode.key}
-    >
-      <span className="drive-mode-name">{mode.name}</span>
-      <b className="drive-mode-range">{mode.range}</b>
-      <em className="drive-mode-flag">{mode.key === activeMode ? 'ENGAGED' : 'STANDBY'}</em>
-    </div>)}
-  </div>
+  return <p className={`drive-mode ${activeMode.toLowerCase()}`}>{activeMode}</p>
 }
 
 function BatteryTank({ value }) {
@@ -68,13 +54,8 @@ function BatteryTank({ value }) {
   </div>
 }
 
-function MetricFooter({ label, value, accent = false }) {
-  return <div className="metric-bottom"><span>{label}</span><b className={accent ? 'accent-text' : ''}>{value}</b></div>
-}
-
 export default function TelemetryPanel({ car, alertCount }) {
   const tempRatio = clamp((car.temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN), 0, 1) * 100
-  const tempHot = car.temp >= 38
 
   return <section className="telemetry-column" aria-label="Vehicle telemetry">
     <div className="selected-vehicle panel">
@@ -89,7 +70,6 @@ export default function TelemetryPanel({ car, alertCount }) {
       <article className="metric-card speed-card">
         <div className="metric-title"><span>SPEED</span><Icon name="dots" size={18} /></div>
         <SpeedGauge speed={car.speed} />
-        <MetricFooter label="CRUISE" value={car.speed > 0 ? 'ENGAGED' : 'OFF'} accent={car.speed > 0} />
       </article>
 
       <article className="metric-card battery-card">
@@ -101,7 +81,10 @@ export default function TelemetryPanel({ car, alertCount }) {
             <p>{formatRange(car.rangeKm)} <span>available</span></p>
           </div>
         </div>
-        <MetricFooter label="DRIVING RANGE" value={formatRange(car.rangeKm)} accent />
+        <div className="range-split">
+          <div><span>ECO</span><b>{formatRange(car.ecoRangeKm)}</b></div>
+          <div><span>POWER</span><b>{formatRange(car.powerRangeKm)}</b></div>
+        </div>
       </article>
 
       <article className="metric-card temp-card">
@@ -111,15 +94,13 @@ export default function TelemetryPanel({ car, alertCount }) {
           <div className="temp-scale"><i style={{ left: `${tempRatio}%` }} /></div>
           <div className="temp-labels"><span>15°</span><span>25°</span><span>35°</span><span>45°</span></div>
         </div>
-        <MetricFooter label="SYSTEM" value={tempHot ? 'THERMAL LOAD' : 'NOMINAL'} accent={tempHot} />
       </article>
     </div>
 
     <DriveModes speed={car.speed} />
 
     <div className="vehicle-summary">
-      <div><span>ODOMETER</span><b>{car.odometer}</b></div>
-      <div><span>DRIVER</span><b>{car.driver}</b></div>
+      <div className="odometer"><span>ODOMETER</span><b>{car.odometer}</b></div>
       <div><span>ACTIVE ALERTS</span><b className={alertCount > 0 ? 'alert-count' : ''}>{String(alertCount).padStart(2, '0')}</b></div>
     </div>
   </section>

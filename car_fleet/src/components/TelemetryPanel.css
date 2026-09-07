@@ -1,52 +1,50 @@
-.telemetry-column { display: grid; gap: 14px; min-width: 0; }
+.telemetry-column { display: grid; gap: 16px; min-width: 0; }
 
 .selected-vehicle {
-  padding: 14px 16px;
+  padding: 0 0 20px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-radius: var(--r-md);
 }
 .selected-vehicle h2 {
   margin: 0;
-  font: 800 17px Orbitron, sans-serif;
+  font: 800 24px Orbitron, sans-serif;
   letter-spacing: -.4px;
 }
 .vehicle-id {
-  font: 600 10px Manrope, sans-serif;
+  font: 600 14px Manrope, sans-serif;
   color: var(--text-3);
-  margin-left: 6px;
+  margin-left: 8px;
   vertical-align: middle;
 }
 
 .telemetry-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 0;
 }
 
-/* Equal-height cards with a consistent internal rhythm — this is the alignment fix */
+/* Equal-height columns with a consistent internal rhythm — this is the alignment fix */
 .metric-card {
-  border-radius: var(--r-md);
   min-width: 0;
-  min-height: 244px;
-  padding: 13px;
+  min-height: 218px;
+  padding: 0 26px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  overflow: hidden;
-  transition: border-color .25s var(--ease), transform .25s var(--ease);
+  gap: 12px;
 }
-.metric-card:hover { border-color: var(--line-hot); transform: translateY(-2px); }
+.metric-card + .metric-card { border-left: 1px solid var(--line); }
+.metric-card:first-child { padding-left: 0; }
+.metric-card:last-child { padding-right: 0; }
 
 .metric-title {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  color: var(--text-3);
-  font: 700 8px Orbitron, sans-serif;
+  color: var(--text-2);
+  font: 700 12px Orbitron, sans-serif;
   letter-spacing: .8px;
   flex: none;
 }
@@ -55,8 +53,8 @@
 /* ---------- Speed gauge ---------- */
 .gauge-wrap {
   position: relative;
-  width: 118px;
-  height: 118px;
+  width: 138px;
+  height: 138px;
   margin: auto;
   flex: none;
 }
@@ -75,108 +73,45 @@
   text-align: center;
 }
 .gauge-value strong {
-  font: 800 26px/1 Orbitron, sans-serif;
+  font: 800 36px/1 Orbitron, sans-serif;
   letter-spacing: -1.5px;
   font-variant-numeric: tabular-nums;
 }
 .gauge-value span {
   display: block;
-  margin-top: 5px;
-  font: 700 6px Orbitron, sans-serif;
-  color: var(--text-3);
-  letter-spacing: 1px;
-}
-
-/* Drive modes: full-width row of its own, sized to be read at a glance */
-.drive-modes {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-.drive-mode {
-  position: relative;
-  min-width: 0;
-  padding: 16px 18px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: linear-gradient(168deg, var(--surface-2), var(--surface));
-  color: var(--text-3);
-  overflow: hidden;
-  transition: all .28s var(--ease);
-}
-.drive-mode-name,
-.drive-mode-range {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.drive-mode-name {
-  font: 800 15px Orbitron, sans-serif;
-  letter-spacing: .4px;
-  color: var(--text-2);
-  transition: color .28s var(--ease);
-}
-.drive-mode-range {
   margin-top: 6px;
   font: 700 11px Orbitron, sans-serif;
   color: var(--text-3);
-  letter-spacing: .5px;
-}
-.drive-mode-flag {
-  position: absolute;
-  top: 16px;
-  right: 18px;
-  font: 700 7px Orbitron, sans-serif;
-  font-style: normal;
   letter-spacing: 1px;
-  color: var(--text-3);
-  padding: 4px 7px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
 }
 
-.drive-mode.active {
-  border-color: var(--red);
-  background: linear-gradient(120deg, var(--red-wash), var(--surface) 65%);
-  box-shadow: inset 2px 0 var(--red);
+/* Drive mode: the engaged mode, boxed */
+.drive-mode {
+  margin: 0;
+  align-self: start;
+  justify-self: start;
+  display: inline-block;
+  padding: 8px 16px;
+  border: 1px solid var(--red);
+  border-radius: var(--r-sm);
+  color: var(--red);
+  font: 800 14px Orbitron, sans-serif;
+  letter-spacing: 1px;
 }
-.drive-mode.active .drive-mode-name { color: var(--red); }
-.drive-mode.active .drive-mode-range { color: var(--text); }
-.drive-mode.active .drive-mode-flag {
-  color: #fff;
-  background: var(--red-dim);
-  border-color: var(--red);
-}
-
-.metric-bottom {
-  border-top: 1px solid var(--line);
-  padding-top: 9px;
-  margin-top: auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 6px;
-  font: 700 7px Orbitron, sans-serif;
-  letter-spacing: .5px;
-  color: var(--text-3);
-  flex: none;
-}
-.metric-bottom b { font-size: 7px; color: var(--text-2); }
 
 /* ---------- Battery ---------- */
 .battery-main {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: 16px;
   flex: 1;
   min-height: 0;
 }
 .tank-shell { position: relative; padding-top: 7px; flex: none; }
 .tank-cap {
   position: absolute;
-  width: 16px;
+  width: 18px;
   height: 7px;
   left: 50%;
   top: 0;
@@ -187,27 +122,26 @@
   border-radius: 3px 3px 0 0;
 }
 .tank {
-  height: 92px;
-  width: 40px;
+  height: 104px;
+  width: 46px;
   border: 2px solid var(--line-hot);
   border-radius: 6px 6px 10px 10px;
   overflow: hidden;
   position: relative;
-  background: #0a0c0e;
-  box-shadow: inset 0 0 14px rgba(0, 0, 0, .9);
+  background: var(--raised);
 }
 .tank-lines {
   position: absolute;
   inset: 6px;
   z-index: 2;
-  background: repeating-linear-gradient(to bottom, transparent 0 13px, rgba(255, 255, 255, .07) 13px 14px);
+  background: repeating-linear-gradient(to bottom, transparent 0 13px, rgba(20, 24, 30, .09) 13px 14px);
 }
 .charge-liquid {
   position: absolute;
   bottom: 0;
   left: 0;
   width: 100%;
-  background: linear-gradient(180deg, var(--red), var(--red-deep));
+  background: linear-gradient(180deg, var(--red-bright), var(--red-dim));
   transition: height .7s var(--ease);
 }
 .charge-liquid::after {
@@ -223,29 +157,47 @@
 .charge-liquid span {
   position: absolute;
   inset: 6px 4px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, .22), transparent 30%);
+  background: linear-gradient(90deg, rgba(255, 255, 255, .3), transparent 30%);
 }
 
 .battery-read { min-width: 0; }
 .battery-read strong {
-  font: 800 27px Orbitron, sans-serif;
+  font: 800 36px Orbitron, sans-serif;
   letter-spacing: -1.5px;
   font-variant-numeric: tabular-nums;
 }
-.battery-read sup, .temperature sup { font-size: 11px; color: var(--red); letter-spacing: 0; }
-.battery-read p { margin: 5px 0 0; font-size: 9px; color: var(--text-2); white-space: nowrap; }
+.battery-read sup, .temperature sup { font-size: 15px; color: var(--red); letter-spacing: 0; }
+.battery-read p { margin: 6px 0 0; font-size: 13px; color: var(--text-2); white-space: nowrap; }
 .battery-read p span { color: var(--text-3); }
+
+/* Per-mode range estimates under the battery reading */
+.range-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.range-split > div { display: grid; gap: 4px; padding-left: 14px; }
+.range-split > div:first-child { padding-left: 0; }
+.range-split > div + div { border-left: 1px solid var(--line); }
+.range-split span {
+  color: var(--text-3);
+  font: 700 10px Orbitron, sans-serif;
+  letter-spacing: .8px;
+}
+.range-split b { font: 700 15px Orbitron, sans-serif; color: var(--text); }
 
 /* ---------- Temperature ---------- */
 .temperature { margin: auto 0; width: 100%; }
 .temperature strong {
-  font: 800 27px Orbitron, sans-serif;
+  font: 800 36px Orbitron, sans-serif;
   letter-spacing: -1.5px;
   font-variant-numeric: tabular-nums;
 }
 .temp-scale {
-  margin-top: 18px;
-  height: 4px;
+  margin-top: 20px;
+  height: 6px;
   border-radius: 3px;
   background: linear-gradient(90deg, var(--raised), var(--red-deep), var(--red), var(--red-bright));
   position: relative;
@@ -253,10 +205,10 @@
 .temp-scale i {
   position: absolute;
   top: 50%;
-  width: 9px;
-  height: 9px;
-  border: 2px solid #fff;
-  background: var(--bg);
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--text);
+  background: var(--surface);
   border-radius: 50%;
   transform: translate(-50%, -50%);
   transition: left .7s var(--ease);
@@ -264,57 +216,77 @@
 .temp-labels {
   display: flex;
   justify-content: space-between;
-  margin-top: 7px;
+  margin-top: 9px;
   color: var(--text-3);
-  font: 600 7px Orbitron, sans-serif;
+  font: 600 11px Orbitron, sans-serif;
 }
 
 /* ---------- Summary strip ---------- */
 .vehicle-summary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  overflow: hidden;
-  background: var(--line);
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
 }
 .vehicle-summary > div {
   display: grid;
-  gap: 5px;
-  padding: 12px 14px;
-  background: var(--surface-2);
+  gap: 6px;
+  padding: 0 22px;
   min-width: 0;
 }
+.vehicle-summary > div + div { border-left: 1px solid var(--line); }
+.vehicle-summary > div:first-child { padding-left: 0; }
 .vehicle-summary span {
   color: var(--text-3);
-  font: 700 7px Orbitron, sans-serif;
+  font: 700 11px Orbitron, sans-serif;
   letter-spacing: .6px;
 }
 .vehicle-summary b {
-  font: 700 12px Orbitron, sans-serif;
+  font: 700 16px Orbitron, sans-serif;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.vehicle-summary .odometer b { font-size: 26px; letter-spacing: -.5px; }
 .vehicle-summary .alert-count { color: var(--red); }
 
 @media (max-width: 1250px) {
   .telemetry-grid { grid-template-columns: 1fr 1fr; }
-  .temp-card { grid-column: span 2; min-height: 0; }
-  .temp-card .temperature { display: flex; align-items: center; gap: 18px; }
+  .temp-card {
+    grid-column: span 2;
+    min-height: 0;
+    padding: 22px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    margin-top: 22px;
+  }
+  .temp-card .temperature { display: flex; align-items: center; gap: 20px; }
   .temp-card .temperature strong { flex: none; }
   .temp-card .temp-scale { flex: 1; margin-top: 0; }
   .temp-card .temp-labels { display: none; }
 }
 @media (max-width: 700px) {
   .telemetry-grid { grid-template-columns: 1fr; }
-  .drive-modes { grid-template-columns: 1fr; }
   .temp-card { grid-column: auto; }
-  .vehicle-summary { grid-template-columns: 1fr; }
-  .vehicle-summary > div { grid-template-columns: 1fr auto; align-items: center; }
+  .metric-card {
+    min-height: 0;
+    padding: 22px 0 0;
+    border-left: 0;
+  }
+  .metric-card + .metric-card { border-top: 1px solid var(--line); }
+  .metric-card:first-child { padding-top: 0; }
+  .vehicle-summary { grid-template-columns: 1fr; gap: 16px; }
+  .range-split { grid-template-columns: 1fr 1fr; }
+  .vehicle-summary > div {
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    padding: 0;
+  }
+  .vehicle-summary > div + div { border-left: 0; }
 }
 @media (max-width: 590px) {
   .selected-vehicle { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .selected-vehicle h2 { font-size: 20px; }
 }
