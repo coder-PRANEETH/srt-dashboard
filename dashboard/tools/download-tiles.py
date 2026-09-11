@@ -66,7 +66,7 @@ BLOCKED_HOSTS = (
 )
 
 USER_AGENT = ('srt-dashboard-offline-tiles/1.0 '
-              '(student project; contact: rakshit.spam00@gmail.com)')
+              '(student project; contact: praneeth.m1000@gmail.com)')
 REQUEST_DELAY = 0.12
 
 

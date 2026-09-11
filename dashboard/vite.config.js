@@ -11,8 +11,25 @@ import react from '@vitejs/plugin-react'
  */
 const ESP_HOST = process.env.DASH_ESP_HOST || 'http://192.168.4.1'
 
+/*
+ * Vite marks its generated <script> and <link rel=stylesheet> tags with
+ * crossorigin. That attribute makes the browser do a CORS check, and the
+ * ESP32 only sends Access-Control-Allow-Origin on /api/* - never on
+ * static files. The result: the CSS downloads fine but the browser
+ * discards it, and the dashboard renders completely unstyled.
+ *
+ * Everything here is same-origin (the board serves the page and its
+ * assets), so the attribute buys nothing. Strip it.
+ */
+const stripCrossorigin = {
+  name: 'strip-crossorigin',
+  transformIndexHtml(html) {
+    return html.replace(/\s+crossorigin(?==|\s|>)(="[^"]*")?/g, '')
+  },
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), stripCrossorigin],
 
   /*
    * Relative asset URLs. The board serves everything from the filesystem

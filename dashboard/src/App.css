@@ -1,4 +1,15 @@
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@300;400;500;600;700;800&display=swap');
+/*
+ * No webfont import here on purpose.
+ *
+ * The ESP32 serves this page from its own access point with no
+ * internet, so an @import to fonts.googleapis.com never resolves.
+ * A pending @import blocks the whole stylesheet from applying, so
+ * the dashboard rendered completely unstyled on the car.
+ *
+ * The --sans / --cond stacks below fall back to system-ui, which
+ * needs no network. To get Inter/Barlow back, self-host the .woff2
+ * files in public/ and @font-face them from here.
+ */
 
 /* ============================================================
    Dark instrument cluster.
@@ -386,12 +397,6 @@ button { font: inherit; color: inherit; }
   flex-direction: column;
   
 }
-.steering{
-  width: 70%;
- 
-
-}
-
 .stegreen{
   color: rgb(70, 209, 127);
   text-shadow: 0 0 8px rgba(16, 197, 91, 0.35);

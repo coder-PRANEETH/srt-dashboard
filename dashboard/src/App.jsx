@@ -527,7 +527,6 @@ function CameraView({
     <div className="camera"> 
   <div className="stecon">
       <h2 className='stegreen'>Automatic</h2>
-      <img src="./public/steering2.png" alt="Forward view" className="steering stegreen" />
   </div>
       <button
         type="button"

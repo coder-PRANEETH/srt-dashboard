@@ -84,6 +84,9 @@ bool sendFile(String path) {
     );
   }
 
+  
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+
   server.streamFile(f, mimeFor(path));
 
   f.close();
