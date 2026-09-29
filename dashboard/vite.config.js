@@ -52,13 +52,19 @@ export default defineConfig({
     /*
      * One JS file and one CSS file. Each extra chunk costs a whole 4 KB
      * LittleFS block and another request over a slow SoftAP link.
+     *
+     * The short content hash in the name is what makes a rebuilt site
+     * actually reach the browser. With fixed names (app.js/index.css) a
+     * cached copy shadows the new one forever and the dashboard renders
+     * with stale or missing CSS. A new hash means a new URL, which no
+     * cache can have seen before.
      */
     rollupOptions: {
       output: {
         inlineDynamicImports: true,
-        entryFileNames: 'assets/app.js',
-        chunkFileNames: 'assets/app.js',
-        assetFileNames: 'assets/[name][extname]',
+        entryFileNames: 'assets/app-[hash:8].js',
+        chunkFileNames: 'assets/app-[hash:8].js',
+        assetFileNames: 'assets/[name]-[hash:8][extname]',
       },
     },
   },

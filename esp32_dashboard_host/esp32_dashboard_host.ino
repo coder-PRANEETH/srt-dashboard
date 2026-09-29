@@ -1,41 +1,88 @@
-
 /*
- * ESP32 #1 - WEB SERVER + GPS RECEIVER
+ * ESP32 #1 - WEB SERVER + CAN RECEIVER
  *
- * ESP32 #2 GPIO17 (TX) -> ESP32 #1 GPIO16 (RX)
- * ESP32 #2 GND         -> ESP32 #1 GND
+ * Hosts the dashboard website from flash on its own WiFi, and receives
+ * the GPS fix from ESP32 #2 over the CAN bus.
+ *
+ * BEFORE UPLOADING - both of these matter:
+ *   1. Tools > Partition Scheme > "No OTA (2MB APP/2MB SPIFFS)"
+ *   2. Upload the website itself (Ctrl+Shift+P > Upload LittleFS)
+ *
+ * WIRING - MCP2515 CAN module
+ *   VCC -> 5V (or 3V3 if your board is a 3.3V version)
+ *   GND -> GND
+ *   SCK -> GPIO18
+ *   SI  -> GPIO23
+ *   SO  -> GPIO19
+ *   CS  -> GPIO25
+ *   INT -> GPIO27
+ *
+ * WIRING - the bus itself
+ *   CANH -> CANH on ESP32 #2's module
+ *   CANL -> CANL on ESP32 #2's module
+ *   120 ohm across CANH/CANL at each end (most boards have one fitted),
+ *   and join the two GNDs.
+ *
+ * WIRING - potentiometer (speed dial)
+ *   outer leg -> 3V3
+ *   wiper     -> GPIO34    must be 32-39; other pins read 0 with WiFi on
+ *   outer leg -> GND
+ *
+ * THEN: connect to WiFi "srt-dash" and open http://192.168.4.1
  */
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
+#include <SPI.h>
+#include <mcp_can.h>
 
 const char *AP_SSID = "srt-dash";
-const char *AP_PASS = "srt-dash-2026";
+const char *AP_PASS = "12345678";
 
-/* ESP32 #2 -> ESP32 #1 */
-#define LINK_RX 16
-#define LINK_TX -1
-#define LINK_BAUD 115200
+/* ---------------- CAN ---------------- */
 
-/* Potentiometer */
+#define CAN_CS 25
+#define CAN_INT 27
+#define CAN_SPEED CAN_500KBPS
+
+/* MUST match the crystal printed on your MCP2515 board (8.000/16.000). */
+#define CAN_CRYSTAL MCP_8MHZ
+
+#define CAN_ID_POS 0x100
+#define CAN_ID_INFO 0x101
+#define CAN_ID_BEAT 0x102
+
+/* ---------------- other ---------------- */
+
 #define POT_PIN 34
 #define MAX_SPEED 160.0
 
-/* GPS timeout */
+/* A fix older than this counts as lost. */
 #define FIX_TIMEOUT_MS 35000
 
 const char *NO_FIX =
   "{\"lat\":0,\"lon\":0,\"sats\":0,\"fix\":false}";
 
 WebServer server(80);
-HardwareSerial gpsLink(2);
+MCP_CAN CAN(CAN_CS);
 
-char gpsCache[160];
-unsigned long gpsAt = 0;
+bool canReady = false;
 
-char rxBuf[160];
-int rxLen = 0;
+/* Latest values decoded off the bus. */
+int32_t rxLat = 0, rxLon = 0;
+uint16_t rxSpeed = 0, rxCourse = 0xFFFF, rxHdop = 0;
+uint8_t rxSats = 0, rxFix = 0;
+uint32_t rxBeat = 0;
+
+unsigned long gpsAt = 0;          /* when a position frame last arrived */
+unsigned long canFrames = 0;
+
+/* For the one-line serial report. */
+unsigned long lastReport = 0;
+unsigned long lastReportFrames = 0;
+
+#define REPORT_EVERY_MS 1000
 
 
 /* --------------------------------------------------
@@ -51,7 +98,6 @@ const char *mimeFor(const String &p) {
 
   return "text/plain";
 }
-
 
 bool sendFile(String path) {
 
@@ -75,16 +121,15 @@ bool sendFile(String path) {
     return false;
   }
 
-  if (path.startsWith("/assets/") ||
-      path.startsWith("/tiles/")) {
-
-    server.sendHeader(
-      "Cache-Control",
-      "max-age=31536000"
-    );
+  if (path.startsWith("/tiles/")) {
+    server.sendHeader("Cache-Control", "max-age=31536000");
+  } else {
+    /* The app files change every time the site is rebuilt. Caching them
+     * for a year means a rebuilt dashboard never reaches the browser,
+     * which looks exactly like "the CSS stopped working". */
+    server.sendHeader("Cache-Control", "no-cache");
   }
 
-  
   server.sendHeader("Access-Control-Allow-Origin", "*");
 
   server.streamFile(f, mimeFor(path));
@@ -96,55 +141,80 @@ bool sendFile(String path) {
 
 
 /* --------------------------------------------------
-   RECEIVE GPS JSON FROM ESP32 #2
+   CAN RECEIVE
    -------------------------------------------------- */
 
-void readLink() {
+int32_t get32(INT8U *b) {
+  return (int32_t)((uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                   ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
+}
 
-  while (gpsLink.available()) {
+uint16_t get16(INT8U *b) {
+  return (uint16_t)(b[0] | (b[1] << 8));
+}
 
-    char c = gpsLink.read();
+/*
+ * Drain every frame waiting in the controller.
+ *
+ * ESP32 #2 splits the fix across three IDs because a CAN frame only
+ * holds 8 bytes; we decode whichever ones have arrived.
+ */
+void readCan() {
+  if (!canReady) return;
 
-    if (c == '\r')
-      continue;
+  INT32U id;
+  INT8U len;
+  INT8U buf[8];
 
-    if (c != '\n') {
+  while (CAN.checkReceive() == CAN_MSGAVAIL) {
 
-      if (rxLen < sizeof(rxBuf) - 1) {
+    if (CAN.readMsgBuf(&id, &len, buf) != CAN_OK) break;
 
-        rxBuf[rxLen++] = c;
+    canFrames++;
 
-      } else {
-
-        /* Line too long */
-        rxLen = 0;
-      }
-
-      continue;
-    }
-
-
-    /* End of line */
-
-    rxBuf[rxLen] = '\0';
-
-
-    if (rxLen > 2 &&
-        rxBuf[0] == '{' &&
-        rxBuf[rxLen - 1] == '}' &&
-        strstr(rxBuf, "\"fix\"")) {
-
-      strcpy(gpsCache, rxBuf);
-
+    if (id == CAN_ID_POS && len == 8) {
+      rxLat = get32(buf);
+      rxLon = get32(buf + 4);
       gpsAt = millis();
 
+    } else if (id == CAN_ID_INFO && len == 8) {
+      rxSpeed = get16(buf);
+      rxCourse = get16(buf + 2);
+      rxSats = buf[4];
+      rxFix = buf[5];
+      rxHdop = get16(buf + 6);
 
-      /* Do not print every fix: at 200 Hz serial logging blocks reception. */
+    } else if (id == CAN_ID_BEAT && len == 8) {
+      rxBeat = (uint32_t)get32(buf);
     }
-
-
-    rxLen = 0;
   }
+}
+
+/*
+ * Rebuild the JSON the website expects.
+ *
+ * Field names must match what App.jsx reads. Course is omitted entirely
+ * when the sender marked it unknown (0xFFFF) - sending 0 would read as
+ * a real heading of due north.
+ */
+void buildJson(char *out, int size) {
+  bool fresh = gpsAt && (millis() - gpsAt < FIX_TIMEOUT_MS);
+  bool fix = fresh && rxFix;
+
+  double lat = fix ? rxLat / 1e7 : 0.0;
+  double lon = fix ? rxLon / 1e7 : 0.0;
+
+  int n = snprintf(out, size,
+                   "{\"lat\":%.6f,\"lon\":%.6f,\"sats\":%u",
+                   lat, lon, fix ? rxSats : 0);
+
+  if (fix)
+    n += snprintf(out + n, size - n, ",\"speed\":%.1f", rxSpeed / 10.0);
+
+  if (fix && rxCourse != 0xFFFF)
+    n += snprintf(out + n, size - n, ",\"course\":%.1f", rxCourse / 10.0);
+
+  snprintf(out + n, size - n, ",\"fix\":%s}", fix ? "true" : "false");
 }
 
 
@@ -159,29 +229,13 @@ void handleData() {
   for (int i = 0; i < 16; i++)
     sum += analogRead(POT_PIN);
 
+  float speed = (sum / 16.0) / 4095.0 * MAX_SPEED;
 
-  float speed =
-    (sum / 16.0) /
-    4095.0 *
-    MAX_SPEED;
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
 
-
-  server.sendHeader(
-    "Access-Control-Allow-Origin",
-    "*"
-  );
-  server.sendHeader(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate"
-  );
-
-  server.send(
-    200,
-    "application/json",
-    "{\"value\":" +
-    String(speed, 1) +
-    "}"
-  );
+  server.send(200, "application/json",
+              "{\"value\":" + String(speed, 1) + "}");
 }
 
 
@@ -191,37 +245,13 @@ void handleData() {
 
 void handleGps() {
 
-  bool fresh =
-    gpsAt &&
-    (millis() - gpsAt < FIX_TIMEOUT_MS);
+  char json[160];
+  buildJson(json, sizeof(json));
 
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
 
-  server.sendHeader(
-    "Access-Control-Allow-Origin",
-    "*"
-  );
-  server.sendHeader(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate"
-  );
-
-
-  if (fresh) {
-
-    server.send(
-      200,
-      "application/json",
-      gpsCache
-    );
-
-  } else {
-
-    server.send(
-      200,
-      "application/json",
-      NO_FIX
-    );
-  }
+  server.send(200, "application/json", json);
 }
 
 
@@ -231,66 +261,44 @@ void handleGps() {
 
 void handleStatus() {
 
-  String s =
-    "fs   : " +
-    String(LittleFS.usedBytes() / 1024) +
-    "/" +
-    String(LittleFS.totalBytes() / 1024) +
-    " KB\n";
+  char json[160];
+  buildJson(json, sizeof(json));
 
+  String s = "fs     : " + String(LittleFS.usedBytes() / 1024) + "/" +
+             String(LittleFS.totalBytes() / 1024) + " KB\n";
 
-  s += "fix  : ";
-
-  if (gpsAt)
-    s += String((millis() - gpsAt) / 1000) +
-         "s ago";
-  else
-    s += "never";
-
-
-  s += "\ndata : ";
-  s += gpsCache;
+  s += "can    : ";
+  s += canReady ? "ready" : "NOT FOUND";
+  s += "\nframes : " + String(canFrames);
+  s += "\nbeat   : " + String(rxBeat);
+  s += "\nfix    : ";
+  s += gpsAt ? String((millis() - gpsAt) / 1000) + "s ago" : "never";
+  s += "\njson   : ";
+  s += json;
   s += "\n";
 
-
-  server.send(
-    200,
-    "text/plain",
-    s
-  );
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "text/plain", s);
 }
 
 
 /* --------------------------------------------------
-   FILE FALLBACK
+   NOT FOUND
    -------------------------------------------------- */
 
 void handleNotFound() {
 
-  if (sendFile(server.uri()))
-    return;
+  if (sendFile(server.uri())) return;
 
-
+  /* A missing tile is normal - the site draws a blank square there. */
   if (server.uri().startsWith("/tiles/")) {
-
-    server.send(
-      404,
-      "text/plain",
-      "no tile"
-    );
-
+    server.send(404, "text/plain", "no tile");
     return;
   }
 
-
-  if (!sendFile("/index.html")) {
-
-    server.send(
-      404,
-      "text/plain",
-      "website missing - upload the data folder"
-    );
-  }
+  if (!sendFile("/index.html"))
+    server.send(404, "text/plain",
+                "website missing - upload the data folder");
 }
 
 
@@ -299,116 +307,78 @@ void handleNotFound() {
    -------------------------------------------------- */
 
 void setup() {
-
   Serial.begin(115200);
 
-  strcpy(
-    gpsCache,
-    NO_FIX
-  );
+  pinMode(CAN_INT, INPUT);
 
+  analogSetPinAttenuation((gpio_num_t)POT_PIN, ADC_11db);
 
-  /* ESP32 #2 GPIO17 -> ESP32 #1 GPIO16 */
-
-  gpsLink.begin(
-    LINK_BAUD,
-    SERIAL_8N1,
-    LINK_RX,
-    LINK_TX
-  );
-
-
-  /* Potentiometer */
-
-  analogSetPinAttenuation(
-    (gpio_num_t)POT_PIN,
-    ADC_11db
-  );
-
-
-  /* LittleFS */
-
+  /* false = do NOT format on failure; that would erase the website. */
   if (!LittleFS.begin(false)) {
-
-    Serial.println(
-      "LittleFS failed!"
-    );
-
+    Serial.println("LittleFS failed!");
+    Serial.println("Set Partition Scheme to No OTA, then upload data.");
   } else {
-
-    Serial.printf(
-      "LittleFS %u/%u KB\n",
-      LittleFS.usedBytes() / 1024,
-      LittleFS.totalBytes() / 1024
-    );
+    Serial.printf("LittleFS %u/%u KB\n", LittleFS.usedBytes() / 1024,
+                  LittleFS.totalBytes() / 1024);
   }
 
+  for (int i = 0; i < 5 && !canReady; i++) {
+    if (CAN.begin(MCP_ANY, CAN_SPEED, CAN_CRYSTAL) == CAN_OK) {
+      canReady = true;
+    } else {
+      Serial.println("CAN init failed - check CS pin and crystal setting");
+      delay(400);
+    }
+  }
 
-  /* WiFi Access Point */
+  if (canReady) {
+    CAN.setMode(MCP_NORMAL);
+    Serial.println("CAN ready at 500 kbps");
+  } else {
+    Serial.println("CAN NOT AVAILABLE - website will show no fix");
+  }
 
+  /* Access point only - no internet out here. */
   WiFi.mode(WIFI_AP);
-
-  WiFi.softAP(
-    AP_SSID,
-    AP_PASS
-  );
-
-  WiFi.setSleep(false);
-
+  WiFi.softAP(AP_SSID, AP_PASS);
+  WiFi.setSleep(false);     /* SoftAP drops clients when the radio sleeps */
 
   Serial.print("WiFi \"");
   Serial.print(AP_SSID);
-  Serial.print("\" -> http://");
+  Serial.print("\"  ->  http://");
   Serial.println(WiFi.softAPIP());
 
-
-  /* API routes */
-
-  server.on(
-    "/api/data",
-    handleData
-  );
-
-  server.on(
-    "/api/gps",
-    handleGps
-  );
-
-  server.on(
-    "/status",
-    handleStatus
-  );
-
-
-  server.onNotFound(
-    handleNotFound
-  );
-
-
+  server.on("/api/data", handleData);
+  server.on("/api/gps", handleGps);
+  server.on("/status", handleStatus);
+  server.onNotFound(handleNotFound);
   server.begin();
-
-  Serial.println(
-    "Web server started"
-  );
-
-  Serial.println(
-    "Waiting for GPS data..."
-  );
 }
 
+/*
+ * One line a second: are frames arriving, and do we have a fix?
+ *
+ * "CAN: yes" means new frames landed since the last line - so the bus
+ * is live right now, not merely that something arrived once at boot.
+ */
+void report() {
+  bool receiving = canFrames > lastReportFrames;
+  lastReportFrames = canFrames;
 
-/* --------------------------------------------------
-   LOOP
-   -------------------------------------------------- */
+  bool fresh = gpsAt && (millis() - gpsAt < FIX_TIMEOUT_MS);
+
+  Serial.print("CAN: ");
+  Serial.print(receiving ? "yes" : "no ");
+  Serial.print("   fix: ");
+  Serial.println((fresh && rxFix) ? "true" : "false");
+}
 
 void loop() {
-
-  /* Receive GPS JSON */
-
-  readLink();
-
-
-  /* Handle website requests */
-
+  readCan();
   server.handleClient();
+
+  if (millis() - lastReport >= REPORT_EVERY_MS) {
+    lastReport = millis();
+    report();
+  }
 }

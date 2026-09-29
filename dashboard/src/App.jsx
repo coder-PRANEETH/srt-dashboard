@@ -43,8 +43,16 @@ const MAX_JUMP_KM = 2
 /* Keep the drawn trail bounded. */
 const MAX_TRACK_POINTS = 600
 
-/* Preserve motion visible at a 5 ms source cadence. */
-const MIN_PLOT_DISTANCE_KM = 0.0002
+/*
+ * Don't draw a trail point for anything under 3 m.
+ *
+ * This used to be 0.2 m, which is far below what a consumer GPS can
+ * actually resolve - so ordinary receiver scatter (a few metres even
+ * when perfectly still) was drawn as real movement and the trail
+ * fuzzed while parked. The sender now filters too; this is the second
+ * line of defence.
+ */
+const MIN_PLOT_DISTANCE_KM = 0.003
 
 /*
  * The ESPs can publish much faster than the browser can paint.  Fetch the
@@ -1115,7 +1123,7 @@ function App() {
           }
 
           /*
-           * Below ~20 cm the movement is
+           * Below ~3 m the movement is
            * receiver noise, not the car.
            * Plotting it makes the trail
            * fuzz while parked.
