@@ -11,7 +11,7 @@ export const getStatusClass = (status) => status.toLowerCase().replace(/\s+/g, '
 
 export const formatRange = (km) => `${km} km`
 
-/** Alerts are derived from live telemetry so they always match the selected vehicle. */
+/** Alerts are derived from each saved vehicle record. */
 export function getAlertsFor(car) {
   const alerts = []
 

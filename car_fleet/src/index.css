@@ -1,6 +1,6 @@
 html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
 body {
-  font-family: Manrope, system-ui, Arial, sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Arial, sans-serif;
   background: #eef1f5;
   color: #14181e;
   -webkit-font-smoothing: antialiased;

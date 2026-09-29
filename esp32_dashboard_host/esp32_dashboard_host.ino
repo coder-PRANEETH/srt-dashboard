@@ -132,6 +132,10 @@ bool sendFile(String path) {
 
   server.sendHeader("Access-Control-Allow-Origin", "*");
 
+  /* LittleFS stores compressed app files as .gz, but the URL and MIME type
+   * remain .js/.css. Tell the browser to decompress the response. */
+  if (useGz) server.sendHeader("Content-Encoding", "gzip");
+
   server.streamFile(f, mimeFor(path));
 
   f.close();
@@ -210,6 +214,12 @@ void buildJson(char *out, int size) {
 
   if (fix)
     n += snprintf(out + n, size - n, ",\"speed\":%.1f", rxSpeed / 10.0);
+
+  if (fix && rxHdop)
+    n += snprintf(out + n, size - n, ",\"hdop\":%.2f", rxHdop / 100.0);
+
+  if (fix)
+    n += snprintf(out + n, size - n, ",\"ageMs\":%lu", millis() - gpsAt);
 
   if (fix && rxCourse != 0xFFFF)
     n += snprintf(out + n, size - n, ",\"course\":%.1f", rxCourse / 10.0);

@@ -143,6 +143,8 @@ double outLat = 0, outLon = 0;
 bool outValid = false;
 double lastRawLat = 0, lastRawLon = 0;
 unsigned long heldCount = 0;
+unsigned long lastAcceptedAt = 0;
+unsigned long rejectedJumpCount = 0;
 
 /*
  * Metres between two nearby points.
@@ -169,6 +171,12 @@ void updateFiltered() {
     return;
   }
 
+  /* The receiver normally produces one position per second. Reprocessing
+   * that same sentence at every send only adds delay and cannot improve it. */
+  if (!gps.location.isUpdated()) return;
+
+  const unsigned long now = millis();
+
   double rawLat = gps.location.lat();
   double rawLon = gps.location.lng();
 
@@ -177,7 +185,8 @@ void updateFiltered() {
 
   /* Poor geometry produces the big wild jumps - ignore those fixes and
    * keep showing the last good one. */
-  if (gps.hdop.isValid() && gps.hdop.hdop() > HDOP_MAX) {
+  if (gps.hdop.isValid() && gps.hdop.age() < FIX_MAX_AGE_MS &&
+      gps.hdop.hdop() > HDOP_MAX) {
     heldCount++;
     return;
   }
@@ -187,15 +196,32 @@ void updateFiltered() {
     outLat = rawLat;
     outLon = rawLon;
     outValid = true;
+    lastAcceptedAt = now;
     return;
   }
 
   double moved = metresBetween(outLat, outLon, rawLat, rawLon);
 
+  /* A good HDOP does not rule out a single bad coordinate. Bound the
+   * distance by elapsed time and receiver speed, with room for normal GPS
+   * scatter and acceleration. This rejects a 100 m one-second spike while
+   * allowing a real fast-moving car to catch up after a missed sentence. */
+  const double seconds = max(0.1, (now - lastAcceptedAt) / 1000.0);
+  const double speedMps = gps.speed.isValid() &&
+                          gps.speed.age() < FIX_MAX_AGE_MS
+                            ? min(55.0, gps.speed.kmph() / 3.6) : 0.0;
+  const double allowedMetres = 15.0 + (speedMps + 8.0) * seconds;
+  if (moved > allowedMetres) {
+    rejectedJumpCount++;
+    heldCount++;
+    return;
+  }
+
   /* Parked and the move is within the noise floor: stay put. */
   bool moving = gps.speed.isValid() && gps.speed.kmph() >= STILL_SPEED;
 
   if (!moving && moved < JITTER_M) {
+    lastAcceptedAt = now;
     heldCount++;
     return;
   }
@@ -207,6 +233,7 @@ void updateFiltered() {
 
   outLat += (rawLat - outLat) * k;
   outLon += (rawLon - outLon) * k;
+  lastAcceptedAt = now;
 }
 
 /* Pack a signed 32-bit value little-endian. */
@@ -342,6 +369,9 @@ void printStatus() {
   Serial.print(heldCount);
   Serial.println(" times (noise rejected)");
 
+  Serial.print("jumps rejected  : ");
+  Serial.println(rejectedJumpCount);
+
   if (gps.speed.isValid()) {
     Serial.print("speed           : ");
     Serial.print(gps.speed.kmph(), 1);
@@ -363,8 +393,8 @@ void printStatus() {
   Serial.println(beat);
 
   /* The exact bytes just put on the wire. */
-  int32_t lat = fix ? (int32_t)(gps.location.lat() * 1e7) : 0;
-  int32_t lon = fix ? (int32_t)(gps.location.lng() * 1e7) : 0;
+  int32_t lat = fix ? (int32_t)(outLat * 1e7) : 0;
+  int32_t lon = fix ? (int32_t)(outLon * 1e7) : 0;
   uint16_t spd = (fix && gps.speed.isValid())
                    ? (uint16_t)(gps.speed.kmph() * 10) : 0;
   uint16_t crs = 0xFFFF;
@@ -385,9 +415,9 @@ void printStatus() {
   /* What ESP32 #1 will rebuild and hand to the website. */
   Serial.print("website sees    : ");
   Serial.print("{\"lat\":");
-  Serial.print(fix ? gps.location.lat() : 0.0, 6);
+  Serial.print(fix ? outLat : 0.0, 6);
   Serial.print(",\"lon\":");
-  Serial.print(fix ? gps.location.lng() : 0.0, 6);
+  Serial.print(fix ? outLon : 0.0, 6);
   Serial.print(",\"sats\":");
   Serial.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
   Serial.print(",\"fix\":");
@@ -399,6 +429,8 @@ void printStatus() {
 
 void setup() {
   Serial.begin(115200);
+  /* Keep incoming NMEA bytes while a CAN transfer or status print runs. */
+  GPS.setRxBufferSize(2048);
   GPS.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
 
   pinMode(CAN_INT, INPUT);

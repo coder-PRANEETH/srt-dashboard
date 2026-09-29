@@ -39,6 +39,8 @@ const TILE_RADIUS_KM = 2
 
 /* Drop fixes that jump impossibly far. */
 const MAX_JUMP_KM = 2
+/* Physical sanity check for a single point, in addition to the sender. */
+const MAX_TRACK_SPEED_MPS = 55
 
 /* Keep the drawn trail bounded. */
 const MAX_TRACK_POINTS = 600
@@ -63,25 +65,10 @@ const MIN_PLOT_DISTANCE_KM = 0.003
 const POLL_INTERVAL_MS = 5
 
 const initialTelemetry = {
-  speed: 0,
-  battery: 78,
-  range: 248,
-  voltage: 382.4,
-  current: 84.2,
-  batteryTemp: 31.4,
-  motorTemp: 54.8,
-  controllerTemp: 42.1,
-  ambientTemp: 22.7,
-  rpm: 3240,
-  power: 31.8,
-  regen: 0,
-  signalStrength: 92,
-  latency: 18,
-  heading: 78,
+  speed: null,
+  heading: null,
   satellites: null,
 }
-
-const driveModes = ['Eco', 'Normal', 'Sport']
 
 /* ---------- geo helpers ---------- */
 
@@ -305,13 +292,10 @@ function ClusterGauge({
   max,
   unit,
   label,
-  footLeft,
-  footRight,
-  footMid,
   decimals = 0,
   speed = 0.16,
 }) {
-  const shown = useAnimatedNumber(value, speed)
+  const shown = useAnimatedNumber(value ?? 0, speed)
 
   const pct = Math.min(
     1,
@@ -405,7 +389,7 @@ function ClusterGauge({
       <div className="gauge-core">
 
         <strong className="gauge-value">
-          {shown.toFixed(decimals)}
+          {value === null ? '—' : shown.toFixed(decimals)}
         </strong>
 
         <span className="gauge-unit">
@@ -424,89 +408,6 @@ function ClusterGauge({
   )
 }
 
-/* ---------- battery rail ---------- */
-
-/*
- * The right-hand SOC column: a stack of
- * lit segments above the percentage.
- */
-function BatteryRail({
-  battery,
-  charging,
-}) {
-  const shown = useAnimatedNumber(
-    battery,
-    0.1
-  )
-
-  const level =
-    shown > 45
-      ? 'good'
-      : shown > 18
-        ? 'mid'
-        : 'low'
-
-  const CELLS = 8
-
-  const pct =
-    Math.max(
-      0,
-      Math.min(100, shown)
-    ) / 100
-
-  const litCells = Math.round(
-    pct * CELLS
-  )
-
-  return (
-    <div
-      className={`batt-rail level-${level} ${
-        charging ? 'charging' : ''
-      }`}
-    >
-
-      <span className="rail-cap">
-        BATTERY
-      </span>
-
-      <div className="rail-body">
-
-        <span className="rail-nub" />
-
-        <div className="rail-shell">
-
-          {Array.from(
-            { length: CELLS },
-            (_, i) => (
-              <span
-                key={i}
-                className={`rail-cell ${
-                  i < litCells
-                    ? 'lit'
-                    : ''
-                }`}
-              />
-            )
-          )}
-
-        </div>
-        
-
-      </div>
-
-      <strong className="rail-pct">
-        {shown.toFixed(0)}%
-      </strong>
-
-      <span className="rail-sub">
-        SOC
-      </span>
-
-    </div>
-    
-  )
-}
-
 /* ---------- thermal ---------- */
 
 
@@ -519,33 +420,38 @@ function BatteryRail({
  * as on a lane-keeping cluster.
  */
 function CameraView({
-  speed,
+  gps,
+  detail,
   heading,
   time,
+  distance,
   onOpenMap,
 }) {
-  const dur = Math.max(
-    0.35,
-    3.2 -
-      (speed / MAX_SPEED) *
-        2.7
-  )
-
   return (
-    <div className="camera"> 
-  <div className="stecon">
-      <h2 className='stegreen'>Automatic</h2>
-  </div>
+    <div className="camera">
+      <div className="camera-heading">
+        <span className="camera-label">GPS / ROUTE</span>
+        <span className={`gps-pill ${gps.state}`}><i className="pulse-dot" />{gps.label}</span>
+      </div>
+      <div className="camera-position">
+        {detail.position
+          ? `${detail.position.lat.toFixed(6)}, ${detail.position.lon.toFixed(6)}`
+          : 'Awaiting position'}
+      </div>
+      <div className="camera-stats">
+        <div><span>Satellites</span><strong>{detail.satellites ?? '—'}</strong></div>
+        <div><span>HDOP</span><strong>{detail.hdop?.toFixed(1) ?? '—'}</strong></div>
+        <div><span>Heading</span><strong>{detail.position ? `${Math.round(heading)}°` : '—'}</strong></div>
+        <div><span>Trip</span><strong>{distance.toFixed(2)} km</strong></div>
+      </div>
+      <div className="camera-footer"><span>{time}</span><span>LOCAL GPS · OFFLINE MAP</span></div>
       <button
         type="button"
         className="mapview"
         onClick={onOpenMap}
       >
-        VIEW MAP
+        VIEW ROUTE
       </button>
-
-      
-
     </div>
   )
 }
@@ -852,9 +758,6 @@ function App() {
   const [now, setNow] =
     useState(new Date())
 
-  const [driveMode, setDriveMode] =
-    useState('Normal')
-
   /*
    * The route map doubles as a button:
    * tapping it lifts the card over the
@@ -871,9 +774,17 @@ function App() {
    */
   const [track, setTrack] =
     useState([])
+  const [tripDistance, setTripDistance] = useState(0)
 
   const [gpsAt, setGpsAt] =
     useState(null)
+
+  const [gpsDetail, setGpsDetail] = useState({
+    position: null,
+    satellites: null,
+    hdop: null,
+    speed: null,
+  })
 
   /*
    * Read potentiometer value
@@ -890,6 +801,7 @@ function App() {
     let cancelled = false
     let frame = null
     let pendingValue = null
+    let errorLogged = false
 
     const commit = () => {
       frame = null
@@ -931,11 +843,9 @@ function App() {
         const data =
           await response.json()
 
-        if (
-          Number.isFinite(
-            data?.value
-          )
-        ) {
+        if (!Number.isFinite(data?.value)) {
+          throw new Error('Speed API returned no value')
+        }
 
           pendingValue = Math.max(
             0,
@@ -943,14 +853,17 @@ function App() {
           )
           scheduleCommit()
 
-        }
+        errorLogged = false
+        return true
 
       } catch (error) {
 
-        console.error(
-          'ESP32 connection error:',
-          error
+        if (!errorLogged) console.warn('Speed API unavailable:', error)
+        errorLogged = true
+        if (!cancelled) setTelemetry((current) =>
+          current.speed === null ? current : { ...current, speed: null }
         )
+        return false
 
       }
 
@@ -959,10 +872,10 @@ function App() {
     const poll = async () => {
       while (!cancelled) {
         const startedAt = performance.now()
-        await loadValue()
+        const connected = await loadValue()
         const wait = Math.max(
           0,
-          POLL_INTERVAL_MS - (performance.now() - startedAt)
+          (connected ? POLL_INTERVAL_MS : 500) - (performance.now() - startedAt)
         )
         if (wait > 0) {
           await new Promise((resolve) => setTimeout(resolve, wait))
@@ -1007,10 +920,16 @@ function App() {
     let cancelled = false
     let frame = null
     let acceptedTrack = []
+    let acceptedDistance = 0
     let trackChanged = false
+    let distanceChanged = false
     let pendingGpsAt = null
     let pendingCourse = null
     let pendingSatellites = null
+    let pendingDetail = null
+    let lastAcceptedAt = null
+    let lastUiRefreshAt = 0
+    let errorLogged = false
 
     const commit = () => {
       frame = null
@@ -1024,9 +943,19 @@ function App() {
         setTrack([...acceptedTrack])
       }
 
+      if (distanceChanged) {
+        distanceChanged = false
+        setTripDistance(acceptedDistance)
+      }
+
       if (pendingGpsAt !== null) {
         setGpsAt(pendingGpsAt)
         pendingGpsAt = null
+      }
+
+      if (pendingDetail !== null) {
+        setGpsDetail(pendingDetail)
+        pendingDetail = null
       }
 
       if (
@@ -1074,8 +1003,10 @@ function App() {
         const data =
           await response.json()
 
+        errorLogged = false
+
         if (cancelled) {
-          return
+          return true
         }
 
         /*
@@ -1087,7 +1018,7 @@ function App() {
           data?.fix === false ||
           !isValidFix(data)
         ) {
-          return
+          return true
         }
 
         const point = {
@@ -1095,7 +1026,10 @@ function App() {
           lon: data.lon,
         }
 
-        pendingGpsAt = Date.now()
+        const receivedAt = Date.now()
+        const fixAt = receivedAt - (
+          Number.isFinite(data.ageMs) ? Math.max(0, data.ageMs) : 0
+        )
 
         const previous =
           acceptedTrack[acceptedTrack.length - 1]
@@ -1103,6 +1037,7 @@ function App() {
         if (!previous) {
           acceptedTrack = [point]
           trackChanged = true
+          lastAcceptedAt = receivedAt
         } else {
 
           const moved = distanceKm(
@@ -1117,9 +1052,14 @@ function App() {
            * rather than drawing a spike
            * across the map.
            */
-          if (moved > MAX_JUMP_KM) {
+          const seconds = Math.max(0.1, (receivedAt - lastAcceptedAt) / 1000)
+          const speedMps = Number.isFinite(data.speed)
+            ? Math.min(MAX_TRACK_SPEED_MPS, Math.max(0, data.speed / 3.6))
+            : 0
+          const allowedKm = (15 + (speedMps + 8) * seconds) / 1000
+          if (moved > MAX_JUMP_KM || moved > allowedKm) {
             scheduleCommit()
-            return
+            return true
           }
 
           /*
@@ -1129,14 +1069,32 @@ function App() {
            * fuzz while parked.
            */
           if (moved < MIN_PLOT_DISTANCE_KM) {
+            /* At speed, repeated HTTP reads are the same 1 Hz GPS sample.
+             * Keep its original time so the next real movement gets its
+             * full elapsed-time allowance. While parked, refresh the clock
+             * so a late isolated jump never becomes plausible. */
+            if (!Number.isFinite(data.speed) || data.speed < 3) {
+              lastAcceptedAt = receivedAt
+            }
+            if (receivedAt - lastUiRefreshAt < 250) return true
+            lastUiRefreshAt = receivedAt
+            pendingGpsAt = fixAt
+            pendingDetail = {
+              position: previous,
+              satellites: Number.isFinite(data.sats) ? data.sats : null,
+              hdop: Number.isFinite(data.hdop) ? data.hdop : null,
+              speed: Number.isFinite(data.speed) ? data.speed : null,
+            }
             scheduleCommit()
-            return
+            return true
           }
 
           acceptedTrack = [
             ...acceptedTrack,
             point,
           ]
+          acceptedDistance += moved
+          distanceChanged = true
 
           if (acceptedTrack.length >
             MAX_TRACK_POINTS
@@ -1146,7 +1104,17 @@ function App() {
             )
           }
           trackChanged = true
+          lastAcceptedAt = receivedAt
         }
+
+          lastUiRefreshAt = receivedAt
+          pendingGpsAt = fixAt
+          pendingDetail = {
+            position: point,
+            satellites: Number.isFinite(data.sats) ? data.sats : null,
+            hdop: Number.isFinite(data.hdop) ? data.hdop : null,
+            speed: Number.isFinite(data.speed) ? data.speed : null,
+          }
 
           /*
            * Prefer the course the module
@@ -1171,13 +1139,13 @@ function App() {
           }
 
         scheduleCommit()
+        return true
 
       } catch (error) {
 
-        console.error(
-          'GPS connection error:',
-          error
-        )
+        if (!errorLogged) console.warn('GPS API unavailable:', error)
+        errorLogged = true
+        return false
 
       }
 
@@ -1186,10 +1154,10 @@ function App() {
     const poll = async () => {
       while (!cancelled) {
         const startedAt = performance.now()
-        await loadFix()
+        const connected = await loadFix()
         const wait = Math.max(
           0,
-          POLL_INTERVAL_MS - (performance.now() - startedAt)
+          (connected ? POLL_INTERVAL_MS : 500) - (performance.now() - startedAt)
         )
         if (wait > 0) {
           await new Promise((resolve) => setTimeout(resolve, wait))
@@ -1243,9 +1211,6 @@ function App() {
     [now]
   )
 
-  const charging =
-    telemetry.regen > 0.5
-
   /*
    * Heading shown on the map: the
    * module's course when we have one,
@@ -1261,29 +1226,9 @@ function App() {
       )
     }
 
-    return telemetry.heading
+    return telemetry.heading ?? 0
 
   }, [track, telemetry.heading])
-
-  /*
-   * Distance actually travelled, summed
-   * from the GPS trail rather than the
-   * seeded placeholder.
-   */
-  const tripDistance = useMemo(() => {
-
-    let total = 0
-
-    for (let i = 1; i < track.length; i += 1) {
-      total += distanceKm(
-        track[i - 1],
-        track[i]
-      )
-    }
-
-    return total
-
-  }, [track])
 
   /*
    * A fix older than 5 s means the link
@@ -1308,16 +1253,16 @@ function App() {
     return {
       state: 'ok',
       label: Number.isFinite(
-        telemetry.satellites
+        gpsDetail.satellites
       )
-        ? `${telemetry.satellites} SAT`
+        ? `${gpsDetail.satellites} SAT`
         : 'FIX',
     }
 
   }, [
     gpsAt,
     now,
-    telemetry.satellites,
+    gpsDetail.satellites,
   ])
 
   return (
@@ -1327,30 +1272,12 @@ function App() {
             
         <div className="cluster">
 
-          {/* ---- top rail: drive modes ---- */}
+          {/* ---- top rail ---- */}
 
           <header className="cluster-top">
 
-            <div className="mode-switch">
-
-              {driveModes.map((mode) => (
-                <button
-                key={mode}
-                className={`mode-btn ${
-                  mode === driveMode
-                  ? 'active'
-                  : ''
-                }`}
-                onClick={() =>
-                  setDriveMode(mode)
-                }
-                >
-                  {mode.toUpperCase()}
-                </button>
-
-              ))}
-
-            </div>
+            <div className="cluster-title">SRT <span>LOCAL TELEMETRY</span></div>
+            <span className="cluster-network">ESP32 ACCESS POINT</span>
 
           </header>
 
@@ -1359,22 +1286,21 @@ function App() {
           <div className="cluster-body">
 
             <ClusterGauge
-              value={telemetry.power}
-              max={120}
-              unit="kW"
-              label="POWER OUTPUT"
-              footLeft="CHARGE"
-              footMid="0"
-              footRight="POWER"
+              value={gps.state === 'ok' ? gpsDetail.speed : null}
+              max={MAX_SPEED}
+              unit="km/h"
+              label="GPS SPEED"
               speed={0.14}
             />
 
             <div className="cluster-mid">
 
               <CameraView
-                speed={telemetry.speed}
+                gps={gps}
+                detail={gpsDetail}
                 heading={heading}
                 time={time}
+                distance={tripDistance}
                 onOpenMap={() =>
                   setMapExpanded(true)
                 }
@@ -1386,17 +1312,10 @@ function App() {
               value={telemetry.speed}
               max={MAX_SPEED}
               unit="km/h"
-              label="SPEED"
-              footLeft=""
-              footMid=""
-              footRight=""
+              label="DIAL SPEED"
               speed={0.18}
             />
 
-            <BatteryRail
-              battery={telemetry.battery}
-              charging={charging}
-            />
               
            
            
@@ -1409,11 +1328,11 @@ function App() {
       {/* ---- secondary deck: route + thermal ---- */}
 
       <div className="deck">
-              {mapExpanded ?
+              {
         <MapView
           track={track}
           heading={heading}
-          speed={telemetry.speed}
+          speed={gps.state === 'ok' ? gpsDetail.speed ?? 0 : 0}
           distance={tripDistance}
           gps={gps}
           expanded={mapExpanded}
@@ -1422,7 +1341,7 @@ function App() {
               (open) => !open
             )
           }
-        />:null}
+        />}
 
       
 

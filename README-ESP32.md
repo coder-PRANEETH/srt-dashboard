@@ -1,183 +1,55 @@
-# ESP32 Setup — Run & Upload Guide
+# ESP32 offline dashboard
 
-Two ESP32 boards:
+The dashboard runs from ESP32 #1's own WiFi access point. It needs no internet connection. ESP32 #2 reads the GPS receiver and sends its fix to #1 over CAN.
 
-| Board | Sketch | Job |
+| Board | Sketch | Role |
 |---|---|---|
-| **ESP32 #1** | `esp32_dashboard_host` | Makes its own WiFi, serves the website |
-| **ESP32 #2** | `esp32_gps_sender` | Reads the GPS, sends it to #1 over a wire |
-| (#2, testing) | `esp32_gps_test` | Diagnostic only — run this first |
+| ESP32 #1 | `esp32_dashboard_host/esp32_dashboard_host.ino` | Hosts the site and receives CAN frames |
+| ESP32 #2 | `esp32_gps_sender/esp32_gps_sender.ino` | Reads GPS and sends three CAN frames each second |
+| ESP32 #2, diagnostic | `esp32_gps_test/esp32_gps_test.ino` | Checks the GPS alone |
 
----
+## Setup
 
-## 1. One-time setup
+Install the ESP32 board package, the **TinyGPSPlus** and **mcp_can** Arduino libraries, and a LittleFS data uploader for Arduino IDE. Select **ESP32 Dev Module** and **No OTA (2MB APP/2MB SPIFFS)** for ESP32 #1. The CAN crystal setting in both sketches must match the crystal on each MCP2515 board; the current setting is 8 MHz.
 
-**Install the ESP32 boards** — Arduino IDE → File → Preferences → *Additional Board Manager URLs*:
+### Wiring
 
-```
-https://espressif.github.io/arduino-esp32/package_esp32_index.json
-```
+- GPS TX → ESP32 #2 GPIO16; GPS GND → ESP32 #2 GND. GPS RX is unused. Supply the GPS with the voltage specified by its module.
+- On **each** ESP32, MCP2515 SCK → GPIO18, SI → GPIO23, SO → GPIO19, CS → GPIO25, INT → GPIO27, and GND → GND. Power each CAN module according to its board rating.
+- Connect CANH to CANH, CANL to CANL, and the grounds of the two ESP32 boards. Fit a 120 Ω terminator at each end of the CAN bus.
+- Potentiometer outer legs → ESP32 #1 3V3 and GND; wiper → GPIO34.
 
-Then Tools → Board → Boards Manager → search **esp32** → Install.
+### Upload
 
-**Install the GPS library** — Tools → Manage Libraries → search **TinyGPSPlus** (by Mikal Hart) → Install.
+1. For a GPS check, upload `esp32_gps_test` to ESP32 #2. Open Serial Monitor at **115200**. It reports bytes, checksum errors, satellites, fix, speed, and HDOP. The GPS UART is configured for **9600** baud in both sender and diagnostic sketches.
+2. Upload `esp32_gps_sender` to ESP32 #2.
+3. Build and pack the local website assets:
 
-**Install the filesystem uploader** (needed once, for ESP32 #1 only).
-Download the `.vsix` from
-[arduino-littlefs-upload releases](https://github.com/earlephilhower/arduino-littlefs-upload/releases)
-and drop it into `~/.arduinoIDE/plugins/` (create the folder if missing), then restart the IDE.
+   ```bash
+   cd dashboard
+   npm install
+   npm run build
+   python3 tools/pack-fs.py
+   ```
 
-> Requires Arduino IDE **2.2.1+**. The uploader appears as a command in the
-> Ctrl+Shift+P palette, not in the Tools menu.
+4. Upload `esp32_dashboard_host` to ESP32 #1 with the partition scheme above. Close Serial Monitor and upload the generated `esp32_dashboard_host/data/` folder with the LittleFS uploader.
+5. Connect your phone or laptop to **srt-dash**, password **12345678**, and open **http://192.168.4.1**. A “no internet” WiFi warning is expected; stay connected to this access point.
 
----
+The included map tiles cover about 2 km around SASTRA at zoom levels 13–17. The site uses only local assets, so areas outside that tile set appear blank. To cover another area, obtain licensed offline tiles and put them under `dashboard/public/tiles/{z}/{x}/{y}.png`, then build, pack, and upload again. The packer checks LittleFS capacity before writing.
 
-## 2. Wiring
+## Data and troubleshooting
 
-**GPS module → ESP32 #2**
+- `GET /api/data` returns `{"value":75.4}` from the potentiometer in km/h.
+- `GET /api/gps` returns the filtered position, speed, course when available, satellites, HDOP when available, fix state, and age in milliseconds. A missing fix returns `"fix":false`.
+- `GET /status` reports filesystem usage, CAN frame count, heartbeat, and the latest GPS JSON.
 
-| GPS | ESP32 #2 | Note |
-|---|---|---|
-| VCC | 3V3 | **not 5V** — it can destroy the module |
-| GND | GND | |
-| TX | GPIO16 | crossed: TX → RX |
-| RX | *(not connected)* | we never send the module commands |
+The sender rejects poor HDOP and implausible one-sample jumps before sending coordinates. The browser also rejects implausible route points. Both keep the last accepted path when a bad sample arrives; no GPS receiver can guarantee an accurate position without a good sky view.
 
-**ESP32 #2 → ESP32 #1**
-
-| ESP32 #2 | ESP32 #1 |
+| Symptom | Check |
 |---|---|
-| GPIO17 (TX) | GPIO16 (RX) |
-| GND | GND — **required**, or the link reads garbage |
-
-> Do **not** join 3V3 or 5V between the boards. Power each from its own USB.
-
-**Potentiometer → ESP32 #1** (the speed dial)
-
-| Pot | ESP32 #1 |
-|---|---|
-| outer leg | 3V3 |
-| wiper (middle) | GPIO34 |
-| outer leg | GND |
-
-> Must be GPIO 32–39. Other analog pins read 0 whenever WiFi is on.
-
----
-
-## 3. Test the GPS first
-
-Plug in **ESP32 #2 only**.
-
-1. Tools → Board → **ESP32 Dev Module**
-2. Tools → Port → pick your board
-3. Open `esp32_gps_test/esp32_gps_test.ino` → Upload
-4. Tools → Serial Monitor, set baud to **115200**
-
-What you should see:
-
-- First seconds: `NO DATA` — fine only if it clears within a second or two
-- Then: satellites climbing, `FIX: NO`
-- After 30–90 seconds **outdoors**: a real position
-
-**Indoors it may never lock.** Go to a window or outside. If it stays at
-`NO DATA`, check that GPS TX goes to GPIO16 (crossed), that GND is
-connected, and try 38400 baud — some modules ship at that rate.
-
----
-
-## 4. Upload ESP32 #2 (the sender)
-
-Same board and port settings. Open `esp32_gps_sender/esp32_gps_sender.ino`
-and Upload. The Serial Monitor prints a status block every 2 seconds
-ending in the exact line it sends to ESP32 #1:
-
-```
-sending         : {"lat":10.728012,"lon":79.019534,"sats":9,"speed":0.4,"fix":true}
-```
-
----
-
-## 5. Upload ESP32 #1 (the website host)
-
-This board needs **two** uploads: the program, then the website.
-
-### 5a. Build the website
-
-```bash
-cd dashboard
-npm install          # first time only
-npm run build
-python3 tools/pack-fs.py
-```
-
-`pack-fs.py` gzips the JS/CSS, drops blank map tiles, and copies
-everything into `esp32_dashboard_host/data/`. It prints the headroom —
-if it says **DOES NOT FIT**, re-download tiles at a lower zoom.
-
-### 5b. Set the partition scheme — **do not skip this**
-
-Tools → **Partition Scheme** → **`No OTA (2MB APP/2MB SPIFFS)`**
-
-The default scheme leaves far too little room and the website upload will
-fail or the page will not load.
-
-### 5c. Upload the program
-
-Open `esp32_dashboard_host/esp32_dashboard_host.ino` → Upload.
-
-### 5d. Upload the website
-
-**Close the Serial Monitor first** — it holds the port and the upload fails.
-
-Press `Ctrl+Shift+P` → type **"Upload LittleFS to Pico/ESP8266/ESP32"** → Enter.
-
-This takes a minute or two (~1.5 MB).
-
----
-
-## 6. Run it
-
-1. Power both boards (each on its own USB).
-2. On your phone or laptop, connect to WiFi:
-   - **Network:** `srt-dash`
-   - **Password:** `srt-dash-2026`
-3. Open **http://192.168.4.1**
-
-Your phone may warn "no internet" — that is expected, stay connected.
-
-Health check: **http://192.168.4.1/status** shows filesystem usage, how
-long ago the last fix arrived, and the raw record.
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| Page blank / "upload the data folder" | Step 5d not done, or wrong partition scheme (5b) |
-| `LittleFS failed!` on serial | Wrong partition scheme — set it and redo 5c **and** 5d |
-| Website loads, car never moves | Check the GPIO17→GPIO16 wire **and the shared GND** |
-| `/status` says `fix: never` | ESP32 #2 isn't sending — recheck it in Serial Monitor |
-| Map frozen at one spot | No fresh fix for 5 s; go outdoors |
-| Speed dial stuck at 0 | Pot wiper must be on GPIO34 (32–39 only) |
-| Upload fails / port busy | Close Serial Monitor; hold **BOOT** while it says "Connecting..." |
-| GPS shows `NO DATA` | TX→GPIO16 crossed, GND joined, try 38400 baud |
-
----
-
-## The data contract
-
-ESP32 #2 → ESP32 #1, one line per second:
-
-```json
-{"lat":10.728012,"lon":79.019534,"sats":9,"speed":34.5,"course":78.4,"fix":true}
-```
-
-`speed` and `course` are **optional**. `course` is deliberately omitted
-below 2 km/h — the module reports garbage when stationary, and sending 0
-would pin the map marker to due north.
-
-The website reads two endpoints on ESP32 #1:
-
-- `GET /api/data` → `{"value":75.4}` — potentiometer as km/h
-- `GET /api/gps` → the record above, or `fix:false` if #2 went quiet
+| Blank page | LittleFS upload, partition scheme, and compressed asset response |
+| GPS shows NO DATA | GPS TX → GPIO16, ground, and GPS UART baud |
+| CAN not found | MCP2515 power, CS wiring, and 8/16 MHz crystal setting |
+| No fix on site | Outdoor sky view, both CAN wires, termination, shared ground, and `/status` |
+| Map has blank tiles | Position outside the included offline tile area |
+| Speed dial has no reading | Potentiometer wiper on GPIO34 and `/api/data` |

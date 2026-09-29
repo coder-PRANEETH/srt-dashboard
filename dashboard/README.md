@@ -1,17 +1,12 @@
-# React + Vite
+# SRT car dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This is the site served by `esp32_dashboard_host`. It displays the potentiometer speed from `/api/data` and the filtered CAN GPS fix from `/api/gps`. The route map uses only local tiles under `public/tiles`; there are no hosted fonts or map requests.
 
-Currently, two official plugins are available:
+```bash
+npm install
+npm run dev       # local preview; live values need the ESP32 access point
+npm run build
+python3 tools/pack-fs.py
+```
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
-# srt-dashboard
+The packer creates `../esp32_dashboard_host/data/` for LittleFS upload and checks the partition size. See [the ESP32 guide](../README-ESP32.md) for wiring and upload steps.

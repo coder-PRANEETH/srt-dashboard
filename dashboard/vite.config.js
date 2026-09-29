@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import process from 'node:process'
 
 /*
  * ESP32 #1 hosts this build from LittleFS and exposes /api/data

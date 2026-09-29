@@ -41,8 +41,8 @@
   --amber: #e2a33c;
   --red: #e2565b;
 
-  --sans: 'Inter', system-ui, sans-serif;
-  --cond: 'Barlow Condensed', 'Inter', sans-serif;
+  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --cond: 'Arial Narrow', system-ui, sans-serif;
 
   --r: 14px;
 }
@@ -52,7 +52,7 @@
 html, body, #root {
   height: 100%;
   margin: 0;
-  overflow: hidden;           /* single page, no scroll */
+  overflow-x: hidden;
 }
 
 body {
@@ -102,7 +102,7 @@ button { font: inherit; color: inherit; }
   display: flex;
   flex-direction: column;
   gap: clamp(4px, .8vh, 10px);
-  padding-right: 50px;
+  padding: 0 clamp(10px, 2vw, 32px);
   background:
     radial-gradient(140% 120% at 50% -10%, #151c1b 0%, var(--shell) 45%, #070a0a 100%);
   border: 1px solid #1b2322;
@@ -114,10 +114,14 @@ button { font: inherit; color: inherit; }
 .cluster-top {
   flex: 0 0 auto;
   display: flex;
-  justify-content: center;
-  margin-top: 20px;
-  padding-top: clamp(2px, .5vh, 6px);
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: clamp(8px, 1.2vh, 16px);
 }
+.cluster-title { color: var(--cyan); font-size: clamp(13px, 1.3vw, 18px); font-weight: 800; letter-spacing: .12em; }
+.cluster-title span { color: var(--ink-2); font-size: .62em; font-weight: 600; }
+.cluster-network { color: var(--ink-3); font-size: clamp(8px, .7vw, 10px); letter-spacing: .1em; }
 
 /* ---------------- drive mode switch ---------------- */
 
@@ -161,7 +165,7 @@ button { font: inherit; color: inherit; }
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1.05fr 1.15fr  1.05fr;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 1.12fr) minmax(0, 1fr);
   align-items: center;
   gap: clamp(4px, .9vw, 16px);
 }
@@ -169,7 +173,6 @@ button { font: inherit; color: inherit; }
 /* ---------------- gauges ---------------- */
 
 .gauge {
-  transform:scale(0.8);
   position: relative;
   height: 100%;
   min-height: 0;
@@ -189,7 +192,6 @@ button { font: inherit; color: inherit; }
 
 /* the recessed well the dial sits in */
 .gauge-bowl {
-  fill: url(#none);
   fill: black;
   stroke: #1e2726;
   stroke-width: 1;
@@ -377,14 +379,43 @@ button { font: inherit; color: inherit; }
 
 .camera{
   width: 100%;
-  height: 100%;
+  max-width: 480px;
+  min-height: 0;
   border-radius: 8px;
-  display:flex;
-  justify-content: center;
-  align-items: center;
+  display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: clamp(8px, 1.5vh, 20px);
+  padding: clamp(12px, 1.5vw, 24px);
+  background: #0b1111;
+  border: 1px solid var(--line);
 }
+
+.camera-heading, .camera-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.camera-label, .camera-footer {
+  color: var(--ink-3);
+  font-size: clamp(9px, .75vw, 11px);
+  font-weight: 700;
+  letter-spacing: .1em;
+}
+.camera-position {
+  color: var(--cyan-2);
+  font-size: clamp(11px, 1.1vw, 16px);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.camera-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(8px, 1vw, 16px);
+}
+.camera-stats > div { display: grid; gap: 3px; }
+.camera-stats span { color: var(--ink-3); font-size: clamp(9px, .8vw, 11px); }
+.camera-stats strong { color: var(--ink); font-size: clamp(14px, 1.5vw, 22px); font-variant-numeric: tabular-nums; }
 
 .stecon{
   display: flex;
@@ -408,7 +439,7 @@ button { font: inherit; color: inherit; }
   flex: 0 0 auto;
   height: clamp(120px, 22vh, 210px);
   display: grid;
-  grid-template-columns: 1.6fr 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: clamp(6px, .9vw, 14px);
 }
 
@@ -745,27 +776,42 @@ button { font: inherit; color: inherit; }
 
 @media (max-width: 1100px) {
   .cluster-body {
-    grid-template-columns: 1fr 1.1fr 1fr auto;
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 1.1fr) minmax(0, 1fr);
     gap: clamp(3px, .6vw, 10px);
   }
 }
 
 @media (max-width: 860px) {
-  /* the centre column moves below the dials so nothing is crushed */
+  /* Put the information panel below the gauges on narrow displays. */
   .cluster-body {
-    grid-template-columns: 1fr 1fr auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     grid-template-areas:
-      "left right rail"
-      "mid  mid   mid";
+      "left right"
+      "mid  mid";
+    grid-template-rows: minmax(0, 1fr) auto;
     align-items: center;
   }
   .cluster-body > .gauge:first-child { grid-area: left; }
   .cluster-mid { grid-area: mid; }
   .cluster-body > .gauge:nth-of-type(2) { grid-area: right; }
-  .batt-rail { grid-area: rail; align-self: start; }
+  .cluster-mid { justify-content: flex-start; }
+  .camera { max-width: none; }
+  .camera-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .deck { height: clamp(100px, 19vh, 180px); }
+}
 
-  .deck { grid-template-columns: 1fr; height: auto; }
-  .deck .thermal { display: none; }
+@media (max-width: 520px) {
+  .camera-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .camera-footer { display: none; }
+  .mapview { margin-top: 4px; }
+}
+
+@media (max-width: 860px), (max-height: 560px) {
+  .app { height: auto; min-height: 100dvh; }
+  .binnacle { flex: none; min-height: 0; }
+  .cluster { height: auto; }
+  .cluster-body { min-height: 0; }
+  .gauge { height: clamp(150px, 34vw, 270px); }
 }
 
 @media (max-height: 640px) {
