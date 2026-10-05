@@ -9,7 +9,7 @@ Three things happen here, all needed to make the site fit:
   2. Blank tiles are dropped. LittleFS allocates 4 KB blocks, so a
      156-byte tile of empty farmland costs a whole block. The site draws
      its own blank square where a tile is missing, so this is invisible.
-  3. Everything is copied to esp32_dashboard_host/data/, which is what
+  3. Everything is copied to esp32_can_dashboard_host/data/, which is what
      the Arduino LittleFS uploader flashes.
 
 Run after every `npm run build`.
@@ -37,7 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DASHBOARD = os.path.dirname(HERE)
 REPO = os.path.dirname(DASHBOARD)
 DIST = os.path.join(DASHBOARD, 'dist')
-DATA = os.path.join(REPO, 'esp32_dashboard_host', 'data')
+DATA = os.path.join(REPO, 'esp32_can_dashboard_host', 'data')
 
 
 def blocks(size):

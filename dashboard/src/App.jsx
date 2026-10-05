@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
@@ -750,6 +750,129 @@ function MapView({
 
 /* ---------- app ---------- */
 
+function canU16(data, offset) {
+  return data[offset] | (data[offset + 1] << 8)
+}
+
+function canI32(data, offset) {
+  return data[offset] | (data[offset + 1] << 8) |
+    (data[offset + 2] << 16) | (data[offset + 3] << 24)
+}
+
+function describeCanFrame(frame) {
+  const data = frame.data
+  if (!Array.isArray(data) || data.length !== 8) return '—'
+
+  if (frame.id === 0x100) {
+    return `Position: ${(canI32(data, 0) / 1e7).toFixed(6)}, ${(canI32(data, 4) / 1e7).toFixed(6)}`
+  }
+  if (frame.id === 0x101) {
+    const course = canU16(data, 2)
+    const hdop = canU16(data, 6)
+    return `Speed ${(canU16(data, 0) / 10).toFixed(1)} km/h · Course ${course === 0xFFFF ? 'unknown' : `${(course / 10).toFixed(1)}°`} · ${data[4]} sat · Fix ${data[5] ? 'yes' : 'no'} · HDOP ${hdop ? (hdop / 100).toFixed(2) : 'unknown'}`
+  }
+  if (frame.id === 0x102) {
+    return `Heartbeat ${(canI32(data, 0) >>> 0)} · Sender uptime ${(canI32(data, 4) >>> 0)} s`
+  }
+  return '—'
+}
+
+function formatCanTime(ms) {
+  if (!Number.isFinite(ms)) return '—'
+  const minutes = Math.floor(ms / 60000)
+  const seconds = ((ms % 60000) / 1000).toFixed(1).padStart(4, '0')
+  return `${minutes}:${seconds}`
+}
+
+const CanLog = memo(function CanLog({ onClose }) {
+  const [snapshot, setSnapshot] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const controller = new AbortController()
+    let timer
+    let active = true
+
+    async function poll() {
+      try {
+        const response = await fetch('/api/can-log', {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(`CAN log API returned ${response.status}`)
+        const data = await response.json()
+        if (!Array.isArray(data.frames)) throw new Error('Invalid CAN log response')
+        if (active) {
+          setSnapshot(data)
+          setError('')
+        }
+      } catch (err) {
+        if (active) setError(err.message)
+      } finally {
+        if (active) timer = setTimeout(poll, 750)
+      }
+    }
+
+    poll()
+    return () => {
+      active = false
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  const frames = useMemo(() => [...(snapshot?.frames ?? [])].reverse(), [snapshot])
+
+  return (
+    <div className="can-log-overlay" role="presentation">
+      <section className="can-log-panel" role="dialog" aria-modal="true" aria-labelledby="can-log-title">
+        <header className="can-log-header">
+          <div>
+            <h2 id="can-log-title">CAN LOG</h2>
+            <p>Latest 64 frames received by the dashboard module</p>
+          </div>
+          <button type="button" className="can-log-close" onClick={onClose} autoFocus aria-label="Close CAN log">Close ×</button>
+        </header>
+        <div className="can-log-status" aria-live="polite">
+          <span className={snapshot?.ready ? 'can-ready' : 'can-waiting'}>
+            {snapshot ? (snapshot.ready ? 'CAN MODULE READY' : 'CAN MODULE NOT FOUND') : 'CONNECTING'}
+          </span>
+          <span>{snapshot ? `${snapshot.total} frames received` : 'Waiting for data'}</span>
+          {error && <span className="can-error">{error}</span>}
+        </div>
+        <div className="can-log-table-wrap">
+          <table className="can-log-table">
+            <caption>Newest CAN frames first. Time is since the ESP32 started.</caption>
+            <thead><tr><th scope="col">Time</th><th scope="col">CAN ID</th><th scope="col">DLC</th><th scope="col">Data (hex)</th><th scope="col">Decoded</th></tr></thead>
+            <tbody>
+              {frames.map((frame) => (
+                <tr key={frame.seq}>
+                  <td>{formatCanTime(frame.ms)}</td>
+                  <td>0x{Number(frame.id).toString(16).toUpperCase().padStart(3, '0')}</td>
+                  <td>{frame.dlc}</td>
+                  <td className="can-bytes">{Array.isArray(frame.data) ? frame.data.map((byte) => Number(byte).toString(16).toUpperCase().padStart(2, '0')).join(' ') : '—'}</td>
+                  <td>{describeCanFrame(frame)}</td>
+                </tr>
+              ))}
+              {frames.length === 0 && (
+                <tr><td colSpan="5" className="can-log-empty">{snapshot ? 'No CAN frames received yet.' : 'Loading CAN frames…'}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  )
+})
+
 function App() {
 
   const [telemetry, setTelemetry] =
@@ -766,6 +889,8 @@ function App() {
    */
   const [mapExpanded, setMapExpanded] =
     useState(false)
+  const [canLogOpen, setCanLogOpen] = useState(false)
+  const closeCanLog = useCallback(() => setCanLogOpen(false), [])
 
   /*
    * Empty until the GPS gives a real
@@ -1277,7 +1402,10 @@ function App() {
           <header className="cluster-top">
 
             <div className="cluster-title">SRT <span>LOCAL TELEMETRY</span></div>
-            <span className="cluster-network">ESP32 ACCESS POINT</span>
+            <div className="cluster-actions">
+              <span className="cluster-network">ESP32 ACCESS POINT</span>
+              <button type="button" className="can-log-button" onClick={() => setCanLogOpen(true)}>CAN LOG</button>
+            </div>
 
           </header>
 
@@ -1346,6 +1474,8 @@ function App() {
       
 
       </div>
+
+      {canLogOpen && <CanLog onClose={closeCanLog} />}
 
     </div>
     </div>
