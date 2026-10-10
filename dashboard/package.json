@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:esp": "npm run build && python3 tools/pack-fs.py",
     "lint": "eslint .",
     "preview": "vite preview"
   },

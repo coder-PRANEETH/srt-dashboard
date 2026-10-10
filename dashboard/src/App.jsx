@@ -57,17 +57,52 @@ const MAX_TRACK_POINTS = 600
 const MIN_PLOT_DISTANCE_KM = 0.003
 
 /*
- * The ESPs can publish much faster than the browser can paint.  Fetch the
- * newest sample every 5 ms when the link permits it, but commit visual work
- * on the next animation frame (normally 60 Hz).  This keeps the dashboard
- * responsive while retaining every accepted GPS point in the trail.
+ * Leave the ESP32 time to serve map tiles and drain its CAN controller.
+ * The dial is sampled at 10 Hz and GPS at 2 Hz (the sender publishes at
+ * 1 Hz). Visual changes still commit on the next animation frame.
  */
-const POLL_INTERVAL_MS = 5
+const DIAL_POLL_INTERVAL_MS = 100
+const GPS_POLL_INTERVAL_MS = 500
+const API_TIMEOUT_MS = 3000
+
+async function readApiJson(path, signal) {
+  const request = new AbortController()
+  const abort = () => request.abort()
+  signal.addEventListener('abort', abort, { once: true })
+  if (signal.aborted) abort()
+  const timeout = setTimeout(abort, API_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(path, {
+      cache: 'no-store',
+      signal: request.signal,
+    })
+    if (!response.ok) throw new Error(`${path} returned ${response.status}`)
+    return await response.json()
+  } finally {
+    clearTimeout(timeout)
+    signal.removeEventListener('abort', abort)
+  }
+}
+
+function waitForPoll(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted || ms <= 0) {
+      resolve()
+      return
+    }
+    const finish = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, ms)
+    signal.addEventListener('abort', finish, { once: true })
+  })
+}
 
 const initialTelemetry = {
   speed: null,
-  heading: null,
-  satellites: null,
 }
 
 /* ---------- geo helpers ---------- */
@@ -633,7 +668,7 @@ function MapView({
       last.lon,
     ])
 
-    /* A 200 Hz source must never queue pan animations behind itself. */
+    /* Follow each fix without queuing pan animations behind it. */
     map.current.panTo(
       [
         last.lat,
@@ -795,12 +830,7 @@ const CanLog = memo(function CanLog({ onClose }) {
 
     async function poll() {
       try {
-        const response = await fetch('/api/can-log', {
-          cache: 'no-store',
-          signal: controller.signal,
-        })
-        if (!response.ok) throw new Error(`CAN log API returned ${response.status}`)
-        const data = await response.json()
+        const data = await readApiJson('/api/can-log', controller.signal)
         if (!Array.isArray(data.frames)) throw new Error('Invalid CAN log response')
         if (active) {
           setSnapshot(data)
@@ -909,6 +939,7 @@ function App() {
     satellites: null,
     hdop: null,
     speed: null,
+    course: null,
   })
 
   /*
@@ -923,6 +954,7 @@ function App() {
    */
   useEffect(() => {
 
+    const controller = new AbortController()
     let cancelled = false
     let frame = null
     let pendingValue = null
@@ -954,19 +986,9 @@ function App() {
 
       try {
 
-        const response =
-          await fetch('/api/data', {
-            cache: 'no-store',
-          })
+        const data = await readApiJson('/api/data', controller.signal)
 
-        if (!response.ok) {
-          throw new Error(
-            `API returned ${response.status}`
-          )
-        }
-
-        const data =
-          await response.json()
+        if (cancelled) return true
 
         if (!Number.isFinite(data?.value)) {
           throw new Error('Speed API returned no value')
@@ -983,6 +1005,8 @@ function App() {
 
       } catch (error) {
 
+        if (cancelled) return false
+        pendingValue = null
         if (!errorLogged) console.warn('Speed API unavailable:', error)
         errorLogged = true
         if (!cancelled) setTelemetry((current) =>
@@ -1000,11 +1024,9 @@ function App() {
         const connected = await loadValue()
         const wait = Math.max(
           0,
-          (connected ? POLL_INTERVAL_MS : 500) - (performance.now() - startedAt)
+          (connected ? DIAL_POLL_INTERVAL_MS : 500) - (performance.now() - startedAt)
         )
-        if (wait > 0) {
-          await new Promise((resolve) => setTimeout(resolve, wait))
-        }
+        await waitForPoll(wait, controller.signal)
       }
     }
 
@@ -1012,6 +1034,7 @@ function App() {
 
     return () => {
       cancelled = true
+      controller.abort()
       if (frame !== null) {
         cancelAnimationFrame(frame)
       }
@@ -1042,6 +1065,7 @@ function App() {
    */
   useEffect(() => {
 
+    const controller = new AbortController()
     let cancelled = false
     let frame = null
     let acceptedTrack = []
@@ -1049,8 +1073,6 @@ function App() {
     let trackChanged = false
     let distanceChanged = false
     let pendingGpsAt = null
-    let pendingCourse = null
-    let pendingSatellites = null
     let pendingDetail = null
     let lastAcceptedAt = null
     let lastUiRefreshAt = 0
@@ -1083,25 +1105,6 @@ function App() {
         pendingDetail = null
       }
 
-      if (
-        pendingCourse !== null ||
-        pendingSatellites !== null
-      ) {
-        const course = pendingCourse
-        const satellites = pendingSatellites
-        pendingCourse = null
-        pendingSatellites = null
-
-        setTelemetry((current) => ({
-          ...current,
-          ...(course !== null
-            ? { heading: course }
-            : {}),
-          ...(satellites !== null
-            ? { satellites }
-            : {}),
-        }))
-      }
     }
 
     const scheduleCommit = () => {
@@ -1114,19 +1117,7 @@ function App() {
 
       try {
 
-        const response =
-          await fetch('/api/gps', {
-            cache: 'no-store',
-          })
-
-        if (!response.ok) {
-          throw new Error(
-            `GPS API returned ${response.status}`
-          )
-        }
-
-        const data =
-          await response.json()
+        const data = await readApiJson('/api/gps', controller.signal)
 
         errorLogged = false
 
@@ -1139,10 +1130,13 @@ function App() {
          * powered but has not locked on
          * yet. Keep the last known trail.
          */
-        if (
-          data?.fix === false ||
-          !isValidFix(data)
-        ) {
+        if (data?.fix === false) {
+          pendingGpsAt = null
+          setGpsAt(null)
+          return true
+        }
+
+        if (!isValidFix(data)) {
           return true
         }
 
@@ -1209,6 +1203,7 @@ function App() {
               satellites: Number.isFinite(data.sats) ? data.sats : null,
               hdop: Number.isFinite(data.hdop) ? data.hdop : null,
               speed: Number.isFinite(data.speed) ? data.speed : null,
+              course: Number.isFinite(data.course) ? data.course : null,
             }
             scheduleCommit()
             return true
@@ -1239,28 +1234,7 @@ function App() {
             satellites: Number.isFinite(data.sats) ? data.sats : null,
             hdop: Number.isFinite(data.hdop) ? data.hdop : null,
             speed: Number.isFinite(data.speed) ? data.speed : null,
-          }
-
-          /*
-           * Prefer the course the module
-           * reports; fall back to the
-           * bearing between our last two
-           * points.
-           */
-          if (
-            Number.isFinite(
-              data.course
-            )
-          ) {
-            pendingCourse = data.course
-          }
-
-          if (
-            Number.isFinite(
-              data.sats
-            )
-          ) {
-            pendingSatellites = data.sats
+            course: Number.isFinite(data.course) ? data.course : null,
           }
 
         scheduleCommit()
@@ -1268,6 +1242,7 @@ function App() {
 
       } catch (error) {
 
+        if (cancelled) return false
         if (!errorLogged) console.warn('GPS API unavailable:', error)
         errorLogged = true
         return false
@@ -1282,11 +1257,9 @@ function App() {
         const connected = await loadFix()
         const wait = Math.max(
           0,
-          (connected ? POLL_INTERVAL_MS : 500) - (performance.now() - startedAt)
+          (connected ? GPS_POLL_INTERVAL_MS : 500) - (performance.now() - startedAt)
         )
-        if (wait > 0) {
-          await new Promise((resolve) => setTimeout(resolve, wait))
-        }
+        await waitForPoll(wait, controller.signal)
       }
     }
 
@@ -1294,6 +1267,7 @@ function App() {
 
     return () => {
       cancelled = true
+      controller.abort()
       if (frame !== null) {
         cancelAnimationFrame(frame)
       }
@@ -1344,6 +1318,10 @@ function App() {
    */
   const heading = useMemo(() => {
 
+    if (Number.isFinite(gpsDetail.course)) {
+      return ((gpsDetail.course % 360) + 360) % 360
+    }
+
     if (track.length >= 2) {
       return bearingDeg(
         track[track.length - 2],
@@ -1351,9 +1329,9 @@ function App() {
       )
     }
 
-    return telemetry.heading ?? 0
+    return 0
 
-  }, [track, telemetry.heading])
+  }, [track, gpsDetail.course])
 
   /*
    * A fix older than 5 s means the link
@@ -1363,8 +1341,8 @@ function App() {
 
     if (!gpsAt) {
       return {
-        state: 'searching',
-        label: 'NO FIX',
+        state: gpsDetail.position ? 'stale' : 'searching',
+        label: gpsDetail.position ? 'STALE' : 'NO FIX',
       }
     }
 
@@ -1388,6 +1366,7 @@ function App() {
     gpsAt,
     now,
     gpsDetail.satellites,
+    gpsDetail.position,
   ])
 
   return (

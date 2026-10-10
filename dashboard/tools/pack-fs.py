@@ -9,7 +9,7 @@ Three things happen here, all needed to make the site fit:
   2. Blank tiles are dropped. LittleFS allocates 4 KB blocks, so a
      156-byte tile of empty farmland costs a whole block. The site draws
      its own blank square where a tile is missing, so this is invisible.
-  3. Everything is copied to esp32_can_dashboard_host/data/, which is what
+  3. Everything is copied to esp32_dashboard_host/data/, which is what
      the Arduino LittleFS uploader flashes.
 
 Run after every `npm run build`.
@@ -27,9 +27,11 @@ import math
 import os
 import shutil
 import sys
+import tempfile
 
 BLOCK = 4096
-PARTITION = 0x1E0000          # LittleFS under "No OTA (Large APP)"
+PARTITION = 0x1E0000          # no_ota.csv: 1.875 MiB at offset 0x210000
+FS_RESERVE = 64 * 1024        # directory metadata and free filesystem blocks
 GZIP_EXTS = ('.js', '.css', '.html', '.svg')
 BLANK_MAX = 200               # a tile this small is one flat colour
 
@@ -37,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DASHBOARD = os.path.dirname(HERE)
 REPO = os.path.dirname(DASHBOARD)
 DIST = os.path.join(DASHBOARD, 'dist')
-DATA = os.path.join(REPO, 'esp32_can_dashboard_host', 'data')
+DATA = os.path.join(REPO, 'esp32_dashboard_host', 'data')
 
 
 def blocks(size):
@@ -69,32 +71,40 @@ def main():
                   'nothing to do.', file=sys.stderr)
             return 1
 
+    if not os.path.isfile(os.path.join(source, 'index.html')):
+        print(f'No index.html in {source} - run `npm run build` first. '
+              'Existing data has been kept.', file=sys.stderr)
+        return 1
+
     plan = []          # (source, dest_relative, bytes_on_flash)
     skipped = 0
 
-    for root, _, names in os.walk(source):
-        for name in names:
+    for root, dirs, names in os.walk(source):
+        dirs.sort()
+        for name in sorted(names):
             src = os.path.join(root, name)
             rel = os.path.relpath(src, source)
             size = os.path.getsize(src)
 
-            if name.endswith('.png') and size <= BLANK_MAX:
+            if rel.startswith('tiles' + os.sep) and name.endswith('.png') and size <= BLANK_MAX:
                 skipped += 1
                 continue
 
             if name.endswith(GZIP_EXTS):
-                size = len(gzip.compress(open(src, 'rb').read(), 9))
+                with open(src, 'rb') as inp:
+                    size = len(gzip.compress(inp.read(), 9, mtime=0))
                 rel += '.gz'
 
             plan.append((src, rel, blocks(size)))
 
     used = sum(p[2] for p in plan)
-    head = PARTITION - used
+    head = PARTITION - used - FS_RESERVE
 
     print(f'files      : {len(plan)}  ({skipped} blank tiles dropped)')
-    print(f'on flash   : {used / 1024 / 1024:.2f} MB '
+    print(f'file blocks: {used / 1024 / 1024:.2f} MB '
           f'of {PARTITION / 1024 / 1024:.2f} MB')
-    print(f'headroom   : {head / 1024:.0f} KB')
+    print(f'FS reserve : {FS_RESERVE / 1024:.0f} KB')
+    print(f'headroom   : {head / 1024:.0f} KB (estimate; verify with mklittlefs)')
 
     if head < 0:
         print('\nDOES NOT FIT. Re-download tiles with a lower --max-zoom '
@@ -110,9 +120,10 @@ def main():
         for src, rel, _ in plan:
             dst = os.path.join(DATA, rel)
             if rel.endswith('.gz'):
-                data = open(src, 'rb').read()
+                with open(src, 'rb') as inp:
+                    data = inp.read()
                 with open(dst, 'wb') as out:
-                    out.write(gzip.compress(data, 9))
+                    out.write(gzip.compress(data, 9, mtime=0))
                 os.remove(src)          # drop the uncompressed original
             # non-gzipped files are already in place
 
@@ -131,20 +142,23 @@ def main():
         print('now upload the data folder to LittleFS')
         return 0
 
-    if os.path.isdir(DATA):
-        shutil.rmtree(DATA)
+    # Finish the new copy before replacing the previous upload folder.
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(DATA), prefix='.data-') as staged:
+        for src, rel, _ in plan:
+            dst = os.path.join(staged, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if rel.endswith('.gz'):
+                with open(src, 'rb') as inp, open(dst, 'wb') as out:
+                    out.write(gzip.compress(inp.read(), 9, mtime=0))
+            else:
+                shutil.copy2(src, dst)
 
-    for src, rel, _ in plan:
-        dst = os.path.join(DATA, rel)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        if rel.endswith('.gz'):
-            with open(dst, 'wb') as out:
-                out.write(gzip.compress(open(src, 'rb').read(), 9))
-        else:
-            shutil.copy2(src, dst)
+        if os.path.isdir(DATA):
+            shutil.rmtree(DATA)
+        shutil.copytree(staged, DATA)
 
     print(f'\nwrote {DATA}')
-    print('now run: Arduino IDE > Tools > ESP32 Sketch Data Upload')
+    print('now upload this folder with the LittleFS uploader (not SPIFFS)')
     return 0
 
 

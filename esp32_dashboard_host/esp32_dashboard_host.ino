@@ -16,6 +16,7 @@
  *   SO  -> GPIO19
  *   CS  -> GPIO25
  *   INT -> GPIO27
+ *   SPI/INT must use 3.3V logic; level-shift a 5V-logic module.
  *
  * WIRING - the bus itself
  *   CANH -> CANH on ESP32 #2's module
@@ -59,10 +60,7 @@ const char *AP_PASS = "12345678";
 #define MAX_SPEED 160.0
 
 /* A fix older than this counts as lost. */
-#define FIX_TIMEOUT_MS 35000
-
-const char *NO_FIX =
-  "{\"lat\":0,\"lon\":0,\"sats\":0,\"fix\":false}";
+#define FIX_TIMEOUT_MS 5000
 
 WebServer server(80);
 MCP_CAN CAN(CAN_CS);
@@ -76,7 +74,22 @@ uint8_t rxSats = 0, rxFix = 0;
 uint32_t rxBeat = 0;
 
 unsigned long gpsAt = 0;          /* when a position frame last arrived */
+unsigned long gpsInfoAt = 0;      /* metadata must also keep arriving */
+bool seenPosition = false, seenInfo = false;
 unsigned long canFrames = 0;
+
+/* Bounded RAM history for the dashboard's CAN LOG panel. */
+const uint8_t CAN_LOG_CAPACITY = 64;
+struct CanLogFrame {
+  unsigned long seq, ms;
+  uint32_t id;
+  uint8_t dlc, data[8];
+  bool extended, remote;
+};
+CanLogFrame canLog[CAN_LOG_CAPACITY];
+uint8_t canLogNext = 0, canLogCount = 0;
+
+void readCan();
 
 /* For the one-line serial report. */
 unsigned long lastReport = 0;
@@ -95,6 +108,8 @@ const char *mimeFor(const String &p) {
   if (p.endsWith(".css"))  return "text/css";
   if (p.endsWith(".png"))  return "image/png";
   if (p.endsWith(".svg"))  return "image/svg+xml";
+  if (p.endsWith(".json")) return "application/json";
+  if (p.endsWith(".ico"))  return "image/x-icon";
 
   return "text/plain";
 }
@@ -136,7 +151,18 @@ bool sendFile(String path) {
    * remain .js/.css. Tell the browser to decompress the response. */
   if (useGz) server.sendHeader("Content-Encoding", "gzip");
 
-  server.streamFile(f, mimeFor(path));
+  /* Drain CAN between blocks while a large JS bundle is being served.
+   * The MCP2515 has only two receive buffers. */
+  server.setContentLength(f.size());
+  server.send(200, mimeFor(path), "");
+  char chunk[1024];
+  while (f.available() && server.client().connected()) {
+    readCan();
+    size_t count = f.readBytes(chunk, sizeof(chunk));
+    server.sendContent(chunk, count);
+    yield();
+  }
+  readCan();
 
   f.close();
 
@@ -175,11 +201,24 @@ void readCan() {
     if (CAN.readMsgBuf(&id, &len, buf) != CAN_OK) break;
 
     canFrames++;
+    CanLogFrame &frame = canLog[canLogNext];
+    frame.seq = canFrames;
+    frame.ms = millis();
+    /* mcp_can encodes extended/RTR flags in the top two ID bits. */
+    frame.id = id & 0x1FFFFFFFUL;
+    frame.extended = (id & 0x80000000UL) != 0;
+    frame.remote = (id & 0x40000000UL) != 0;
+    frame.dlc = len > 8 ? 8 : len;
+    memset(frame.data, 0, sizeof(frame.data));
+    if (!frame.remote) memcpy(frame.data, buf, frame.dlc);
+    canLogNext = (canLogNext + 1) % CAN_LOG_CAPACITY;
+    if (canLogCount < CAN_LOG_CAPACITY) canLogCount++;
 
     if (id == CAN_ID_POS && len == 8) {
       rxLat = get32(buf);
       rxLon = get32(buf + 4);
       gpsAt = millis();
+      seenPosition = true;
 
     } else if (id == CAN_ID_INFO && len == 8) {
       rxSpeed = get16(buf);
@@ -187,6 +226,8 @@ void readCan() {
       rxSats = buf[4];
       rxFix = buf[5];
       rxHdop = get16(buf + 6);
+      gpsInfoAt = millis();
+      seenInfo = true;
 
     } else if (id == CAN_ID_BEAT && len == 8) {
       rxBeat = (uint32_t)get32(buf);
@@ -202,29 +243,58 @@ void readCan() {
  * a real heading of due north.
  */
 void buildJson(char *out, int size) {
-  bool fresh = gpsAt && (millis() - gpsAt < FIX_TIMEOUT_MS);
-  bool fix = fresh && rxFix;
+  const unsigned long now = millis();
+  const unsigned long positionAge = now - gpsAt;
+  const unsigned long infoAge = now - gpsInfoAt;
+  bool fix = seenPosition && seenInfo && rxFix == 1 &&
+             positionAge < FIX_TIMEOUT_MS && infoAge < FIX_TIMEOUT_MS &&
+             rxLat >= -900000000 && rxLat <= 900000000 &&
+             rxLon >= -1800000000 && rxLon <= 1800000000 &&
+             (rxLat != 0 || rxLon != 0);
 
-  double lat = fix ? rxLat / 1e7 : 0.0;
-  double lon = fix ? rxLon / 1e7 : 0.0;
+  if (!fix) {
+    snprintf(out, size, "{\"lat\":0,\"lon\":0,\"sats\":0,\"fix\":false}");
+    return;
+  }
 
-  int n = snprintf(out, size,
-                   "{\"lat\":%.6f,\"lon\":%.6f,\"sats\":%u",
-                   lat, lon, fix ? rxSats : 0);
+  char hdop[24] = "", course[28] = "";
+  if (rxHdop)
+    snprintf(hdop, sizeof(hdop), ",\"hdop\":%.2f", rxHdop / 100.0);
+  if (rxCourse < 3600)
+    snprintf(course, sizeof(course), ",\"course\":%.1f", rxCourse / 10.0);
 
-  if (fix)
-    n += snprintf(out + n, size - n, ",\"speed\":%.1f", rxSpeed / 10.0);
+  /* One bounded write also remains safe if a caller supplies a small buffer. */
+  snprintf(out, size,
+           "{\"lat\":%.6f,\"lon\":%.6f,\"sats\":%u,\"speed\":%.1f%s,"
+           "\"ageMs\":%lu%s,\"fix\":true}",
+           rxLat / 1e7, rxLon / 1e7, rxSats, rxSpeed / 10.0, hdop,
+           positionAge > infoAge ? positionAge : infoAge, course);
+}
 
-  if (fix && rxHdop)
-    n += snprintf(out + n, size - n, ",\"hdop\":%.2f", rxHdop / 100.0);
-
-  if (fix)
-    n += snprintf(out + n, size - n, ",\"ageMs\":%lu", millis() - gpsAt);
-
-  if (fix && rxCourse != 0xFFFF)
-    n += snprintf(out + n, size - n, ",\"course\":%.1f", rxCourse / 10.0);
-
-  snprintf(out + n, size - n, ",\"fix\":%s}", fix ? "true" : "false");
+void handleCanLog() {
+  String json;
+  json.reserve(11000);
+  json = "{\"ready\":";
+  json += canReady ? "true" : "false";
+  json += ",\"total\":" + String(canFrames) + ",\"frames\":[";
+  const uint8_t first = (canLogNext + CAN_LOG_CAPACITY - canLogCount) % CAN_LOG_CAPACITY;
+  for (uint8_t i = 0; i < canLogCount; i++) {
+    const CanLogFrame &frame = canLog[(first + i) % CAN_LOG_CAPACITY];
+    if (i) json += ',';
+    json += "{\"seq\":" + String(frame.seq) + ",\"ms\":" + String(frame.ms) +
+            ",\"id\":" + String(frame.id) + ",\"dlc\":" + String(frame.dlc) +
+            ",\"extended\":" + (frame.extended ? "true" : "false") +
+            ",\"remote\":" + (frame.remote ? "true" : "false") + ",\"data\":[";
+    for (uint8_t b = 0; b < (frame.remote ? 0 : frame.dlc); b++) {
+      if (b) json += ',';
+      json += String(frame.data[b]);
+    }
+    json += "]}";
+  }
+  json += "]}";
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
 }
 
 
@@ -282,7 +352,7 @@ void handleStatus() {
   s += "\nframes : " + String(canFrames);
   s += "\nbeat   : " + String(rxBeat);
   s += "\nfix    : ";
-  s += gpsAt ? String((millis() - gpsAt) / 1000) + "s ago" : "never";
+  s += seenPosition ? String((millis() - gpsAt) / 1000) + "s ago" : "never";
   s += "\njson   : ";
   s += json;
   s += "\n";
@@ -298,11 +368,21 @@ void handleStatus() {
 
 void handleNotFound() {
 
+  if (server.uri().startsWith("/api/")) {
+    server.send(404, "application/json", "{\"error\":\"unknown API\"}");
+    return;
+  }
+
   if (sendFile(server.uri())) return;
 
   /* A missing tile is normal - the site draws a blank square there. */
   if (server.uri().startsWith("/tiles/")) {
     server.send(404, "text/plain", "no tile");
+    return;
+  }
+
+  if (server.uri().startsWith("/assets/")) {
+    server.send(404, "text/plain", "asset missing - rebuild and upload data");
     return;
   }
 
@@ -321,6 +401,7 @@ void setup() {
 
   pinMode(CAN_INT, INPUT);
 
+  analogReadResolution(12);
   analogSetPinAttenuation((gpio_num_t)POT_PIN, ADC_11db);
 
   /* false = do NOT format on failure; that would erase the website. */
@@ -360,6 +441,7 @@ void setup() {
 
   server.on("/api/data", handleData);
   server.on("/api/gps", handleGps);
+  server.on("/api/can-log", handleCanLog);
   server.on("/status", handleStatus);
   server.onNotFound(handleNotFound);
   server.begin();
@@ -375,7 +457,9 @@ void report() {
   bool receiving = canFrames > lastReportFrames;
   lastReportFrames = canFrames;
 
-  bool fresh = gpsAt && (millis() - gpsAt < FIX_TIMEOUT_MS);
+  bool fresh = seenPosition && seenInfo &&
+               millis() - gpsAt < FIX_TIMEOUT_MS &&
+               millis() - gpsInfoAt < FIX_TIMEOUT_MS;
 
   Serial.print("CAN: ");
   Serial.print(receiving ? "yes" : "no ");

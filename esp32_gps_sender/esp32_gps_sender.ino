@@ -18,6 +18,7 @@
  *   SO  -> GPIO19
  *   CS  -> GPIO25
  *   INT -> GPIO27       (not used here, but wire it anyway)
+ *   SPI/INT must use 3.3V logic; level-shift a 5V-logic module.
  *
  * WIRING - the bus itself (this is what people forget)
  *   CANH on this module -> CANH on ESP32 #1's module
@@ -71,15 +72,9 @@
 #define SEND_EVERY_MS 1000
 #define PRINT_EVERY_MS 2000
 
-/*
- * How stale a position may be and still be sent.
- *
- * TinyGPSPlus only refreshes the age when a sentence arrives WITH the
- * fix flag set. Under a weak sky the module keeps streaming sentences
- * but clears that flag, so a short limit throws away a position that is
- * still perfectly usable.
- */
-#define FIX_MAX_AGE_MS 30000
+/* Match the dashboard's five-second stale indication. Re-sending an old
+ * position must not make a disconnected GPS look like a fresh fix. */
+#define FIX_MAX_AGE_MS 5000
 
 /* Below this speed the module's course reading is meaningless. */
 #define MIN_COURSE_SPEED 2.0
@@ -138,13 +133,37 @@ bool haveFix() {
   return gps.location.isValid() && gps.location.age() < FIX_MAX_AGE_MS;
 }
 
+bool freshSpeed() {
+  return gps.speed.isValid() && gps.speed.age() < FIX_MAX_AGE_MS;
+}
+
+bool freshCourse() {
+  return gps.course.isValid() && gps.course.age() < FIX_MAX_AGE_MS;
+}
+
+bool freshHdop() {
+  return gps.hdop.isValid() && gps.hdop.age() < FIX_MAX_AGE_MS;
+}
+
+bool freshSatellites() {
+  return gps.satellites.isValid() &&
+         gps.satellites.age() < FIX_MAX_AGE_MS;
+}
+
 /* The filtered position actually broadcast, and its raw counterpart. */
 double outLat = 0, outLon = 0;
-bool outValid = false;
+bool outValid = false;  /* whether an accepted filter anchor exists */
 double lastRawLat = 0, lastRawLon = 0;
 unsigned long heldCount = 0;
 unsigned long lastAcceptedAt = 0;
 unsigned long rejectedJumpCount = 0;
+
+bool filteredFix() {
+  /* An anchor may remain useful for rejecting jumps after its output has
+   * expired. Only a newly accepted sample makes the sent fix fresh. */
+  return haveFix() && outValid &&
+         millis() - lastAcceptedAt < FIX_MAX_AGE_MS;
+}
 
 /*
  * Metres between two nearby points.
@@ -166,6 +185,8 @@ double metresBetween(double aLat, double aLon, double bLat, double bLon) {
  * actually transmitted, not against every intermediate reading.
  */
 void updateFiltered() {
+  const unsigned long now = millis();
+
   if (!haveFix()) {
     outValid = false;
     return;
@@ -175,18 +196,23 @@ void updateFiltered() {
    * that same sentence at every send only adds delay and cannot improve it. */
   if (!gps.location.isUpdated()) return;
 
-  const unsigned long now = millis();
-
   double rawLat = gps.location.lat();
   double rawLon = gps.location.lng();
 
   lastRawLat = rawLat;
   lastRawLon = rawLon;
 
+  if (!isfinite(rawLat) || !isfinite(rawLon) ||
+      rawLat < -90.0 || rawLat > 90.0 ||
+      rawLon < -180.0 || rawLon > 180.0) {
+    rejectedJumpCount++;
+    heldCount++;
+    return;
+  }
+
   /* Poor geometry produces the big wild jumps - ignore those fixes and
    * keep showing the last good one. */
-  if (gps.hdop.isValid() && gps.hdop.age() < FIX_MAX_AGE_MS &&
-      gps.hdop.hdop() > HDOP_MAX) {
+  if (freshHdop() && gps.hdop.hdop() > HDOP_MAX) {
     heldCount++;
     return;
   }
@@ -207,9 +233,9 @@ void updateFiltered() {
    * scatter and acceleration. This rejects a 100 m one-second spike while
    * allowing a real fast-moving car to catch up after a missed sentence. */
   const double seconds = max(0.1, (now - lastAcceptedAt) / 1000.0);
-  const double speedMps = gps.speed.isValid() &&
-                          gps.speed.age() < FIX_MAX_AGE_MS
-                            ? min(55.0, gps.speed.kmph() / 3.6) : 0.0;
+  const double speedMps = freshSpeed()
+                            ? max(0.0, min(55.0, gps.speed.kmph() / 3.6))
+                            : 0.0;
   const double allowedMetres = 15.0 + (speedMps + 8.0) * seconds;
   if (moved > allowedMetres) {
     rejectedJumpCount++;
@@ -218,7 +244,7 @@ void updateFiltered() {
   }
 
   /* Parked and the move is within the noise floor: stay put. */
-  bool moving = gps.speed.isValid() && gps.speed.kmph() >= STILL_SPEED;
+  bool moving = freshSpeed() && gps.speed.kmph() >= STILL_SPEED;
 
   if (!moving && moved < JITTER_M) {
     lastAcceptedAt = now;
@@ -266,7 +292,7 @@ void sendFrame(INT32U id, INT8U *buf) {
 void sendCan() {
   updateFiltered();
 
-  bool fix = haveFix() && outValid;
+  bool fix = filteredFix();
   INT8U buf[8];
 
   /* --- 0x100 : position --- (filtered, not raw) */
@@ -277,8 +303,9 @@ void sendCan() {
   sendFrame(CAN_ID_POS, buf);
 
   /* --- 0x101 : speed, course, sats, fix, hdop --- */
-  uint16_t spd = (fix && gps.speed.isValid())
-                   ? (uint16_t)(gps.speed.kmph() * 10) : 0;
+  uint16_t spd = (fix && freshSpeed())
+                   ? (uint16_t)max(0.0, min(65535.0, gps.speed.kmph() * 10))
+                   : 0;
 
   /*
    * Course is sent as 0xFFFF ("unknown") rather than 0 when the module
@@ -288,15 +315,19 @@ void sendCan() {
    * website then uses its own track bearing instead.
    */
   uint16_t crs = 0xFFFF;
-  if (fix && gps.course.isValid() && gps.speed.isValid() &&
-      gps.speed.kmph() >= MIN_COURSE_SPEED)
+  if (fix && freshCourse() && freshSpeed() &&
+      gps.speed.kmph() >= MIN_COURSE_SPEED &&
+      gps.course.deg() >= 0.0 && gps.course.deg() < 360.0)
     crs = (uint16_t)(gps.course.deg() * 10);
 
-  uint16_t hdop = gps.hdop.isValid() ? (uint16_t)(gps.hdop.hdop() * 100) : 0;
+  uint16_t hdop = freshHdop()
+                    ? (uint16_t)max(0.0, min(65535.0, gps.hdop.hdop() * 100))
+                    : 0;
 
   put16(buf, spd);
   put16(buf + 2, crs);
-  buf[4] = gps.satellites.isValid() ? (INT8U)gps.satellites.value() : 0;
+  buf[4] = freshSatellites()
+               ? (INT8U)min(255UL, (unsigned long)gps.satellites.value()) : 0;
   buf[5] = fix ? 1 : 0;
   put16(buf + 6, hdop);
   sendFrame(CAN_ID_INFO, buf);
@@ -310,7 +341,7 @@ void sendCan() {
 
 /* Everything being put on the bus, in readable form. */
 void printStatus() {
-  bool fix = haveFix() && outValid;
+  bool fix = filteredFix();
 
   Serial.println();
   Serial.println("---------- GPS -> CAN ----------");
@@ -334,7 +365,7 @@ void printStatus() {
   Serial.println(gps.failedChecksum());
 
   Serial.print("satellites      : ");
-  Serial.println(gps.satellites.isValid() ? gps.satellites.value() : 0);
+  Serial.println(freshSatellites() ? gps.satellites.value() : 0);
 
   Serial.print("location valid  : ");
   Serial.println(gps.location.isValid() ? "yes" : "no");
@@ -350,9 +381,11 @@ void printStatus() {
 
   if (fix) {
     Serial.print("raw position    : ");
-    Serial.print(gps.location.lat(), 6);
+    /* TinyGPSPlus's location getters clear isUpdated(). Diagnostics use
+     * our cache so they cannot consume a fix before the CAN send does. */
+    Serial.print(lastRawLat, 6);
     Serial.print(", ");
-    Serial.println(gps.location.lng(), 6);
+    Serial.println(lastRawLon, 6);
 
     Serial.print("sent (filtered) : ");
     Serial.print(outLat, 6);
@@ -361,7 +394,7 @@ void printStatus() {
 
     Serial.print("raw vs sent     : ");
     Serial.print(metresBetween(outLat, outLon,
-                               gps.location.lat(), gps.location.lng()), 2);
+                               lastRawLat, lastRawLon), 2);
     Serial.println(" m  (jitter being absorbed)");
   }
 
@@ -372,19 +405,19 @@ void printStatus() {
   Serial.print("jumps rejected  : ");
   Serial.println(rejectedJumpCount);
 
-  if (gps.speed.isValid()) {
+  if (freshSpeed()) {
     Serial.print("speed           : ");
     Serial.print(gps.speed.kmph(), 1);
     Serial.println(" km/h");
   }
 
-  if (gps.course.isValid()) {
+  if (freshCourse()) {
     Serial.print("course          : ");
     Serial.print(gps.course.deg(), 1);
     Serial.println(" deg");
   }
 
-  if (gps.hdop.isValid()) {
+  if (freshHdop()) {
     Serial.print("HDOP            : ");
     Serial.println(gps.hdop.hdop(), 2);
   }
@@ -395,11 +428,13 @@ void printStatus() {
   /* The exact bytes just put on the wire. */
   int32_t lat = fix ? (int32_t)(outLat * 1e7) : 0;
   int32_t lon = fix ? (int32_t)(outLon * 1e7) : 0;
-  uint16_t spd = (fix && gps.speed.isValid())
-                   ? (uint16_t)(gps.speed.kmph() * 10) : 0;
+  uint16_t spd = (fix && freshSpeed())
+                   ? (uint16_t)max(0.0, min(65535.0, gps.speed.kmph() * 10))
+                   : 0;
   uint16_t crs = 0xFFFF;
-  if (fix && gps.course.isValid() && gps.speed.isValid() &&
-      gps.speed.kmph() >= MIN_COURSE_SPEED)
+  if (fix && freshCourse() && freshSpeed() &&
+      gps.speed.kmph() >= MIN_COURSE_SPEED &&
+      gps.course.deg() >= 0.0 && gps.course.deg() < 360.0)
     crs = (uint16_t)(gps.course.deg() * 10);
 
   Serial.println("--- frames on the bus ---");
@@ -407,7 +442,7 @@ void printStatus() {
   Serial.printf("  0x101 info : speed=%u course=%s sats=%u fix=%u\n",
                 spd,
                 crs == 0xFFFF ? "none" : String(crs).c_str(),
-                (unsigned)(gps.satellites.isValid()
+                (unsigned)(freshSatellites()
                              ? gps.satellites.value() : 0),
                 (unsigned)(fix ? 1 : 0));
   Serial.printf("  0x102 beat : %lu\n", beat);
@@ -419,7 +454,7 @@ void printStatus() {
   Serial.print(",\"lon\":");
   Serial.print(fix ? outLon : 0.0, 6);
   Serial.print(",\"sats\":");
-  Serial.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
+  Serial.print(freshSatellites() ? gps.satellites.value() : 0);
   Serial.print(",\"fix\":");
   Serial.print(fix ? "true" : "false");
   Serial.println("}");
