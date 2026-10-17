@@ -61,7 +61,6 @@ const MIN_PLOT_DISTANCE_KM = 0.003
  * The dial is sampled at 10 Hz and GPS at 2 Hz (the sender publishes at
  * 1 Hz). Visual changes still commit on the next animation frame.
  */
-const DIAL_POLL_INTERVAL_MS = 100
 const GPS_POLL_INTERVAL_MS = 500
 const API_TIMEOUT_MS = 3000
 
@@ -99,10 +98,6 @@ function waitForPoll(ms, signal) {
     const timer = setTimeout(finish, ms)
     signal.addEventListener('abort', finish, { once: true })
   })
-}
-
-const initialTelemetry = {
-  speed: null,
 }
 
 /* ---------- geo helpers ---------- */
@@ -786,30 +781,32 @@ function MapView({
 /* ---------- app ---------- */
 
 function canU16(data, offset) {
-  return data[offset] | (data[offset + 1] << 8)
-}
-
-function canI32(data, offset) {
-  return data[offset] | (data[offset + 1] << 8) |
-    (data[offset + 2] << 16) | (data[offset + 3] << 24)
+  return (data[offset] << 8) | data[offset + 1]
 }
 
 function describeCanFrame(frame) {
-  const data = frame.data
-  if (!Array.isArray(data) || data.length !== 8) return '—'
-
-  if (frame.id === 0x100) {
-    return `Position: ${(canI32(data, 0) / 1e7).toFixed(6)}, ${(canI32(data, 4) / 1e7).toFixed(6)}`
+  const d = frame.data
+  if (!Array.isArray(d) || d.length !== 8) return '—'
+  const on = (v) => v ? 'ON' : 'OFF'
+  switch (frame.id) {
+    case 0x100: {
+      const raw = canU16(d, 0)
+      return `Steering ${((raw & 0x8000 ? raw - 0x10000 : raw) / 10).toFixed(1)}° · ${d[2] ? 'right' : 'left'} · link ${on(d[3])}`
+    }
+    case 0x101: return `Horn ${on(d[0])} · Headlight ${on(d[1])}`
+    case 0x151: return `Immobilizer ${d[0]} · blocked ${on(d[1])} · token ${d[2]}`
+    case 0x200: return `Immobilizer command ${d[0]} · source ${d[1]} · token ${d[2]}`
+    case 0x201: return `Motors ${on(d[0])}/${on(d[1])} · reverse ${on(d[2])} · throttle ${d[3]}% · cruise ${on(d[4])} · ECO ${on(d[5])} · hill ${on(d[6])}`
+    case 0x300: return `Cruise ${on(d[0])} · ECO ${on(d[1])} · reverse ${on(d[2])} · hill ${on(d[3])} · horn ${on(d[4])} · auto ${on(d[5])} · lights ${on(d[6])}`
+    case 0x301: return `Pedal ADC ${canU16(d, 0)} · ${d[2]}% · blocked ${on(d[3])}`
+    case 0x302: return `Brake ${on(d[0])} · raw ${d[1]}`
+    case 0x400: return d[6] ? `GPS ${(d[0] + canU16(d, 1) / 6000).toFixed(6)}, ${(d[3] + canU16(d, 4) / 6000).toFixed(6)} · ${d[7]} sat` : 'GPS no fix'
+    case 0x401: return `Ignition ${on(d[0])} · uptime ${canU16(d, 1)} s`
+    case 0x500: return `Hill request ${on(d[0])} · pitch ${d[3] ? `${d[1] - 90}°` : 'unavailable'} · hold ${d[2]}%`
+    case 0x501: return `Summon ${on(d[4])} · F/R/L/R ${d[0]}/${d[1]}/${d[2]}/${d[3]} · limit ${d[5]}%`
+    case 0x600: return `Node ${d[0]} · ${d[1] ? 'OK' : 'ERROR'} · uptime ${d[2]} s · error ${d[3]} · TX/RX ${d[4]}/${d[5]}`
+    default: return 'Unknown CAN ID'
   }
-  if (frame.id === 0x101) {
-    const course = canU16(data, 2)
-    const hdop = canU16(data, 6)
-    return `Speed ${(canU16(data, 0) / 10).toFixed(1)} km/h · Course ${course === 0xFFFF ? 'unknown' : `${(course / 10).toFixed(1)}°`} · ${data[4]} sat · Fix ${data[5] ? 'yes' : 'no'} · HDOP ${hdop ? (hdop / 100).toFixed(2) : 'unknown'}`
-  }
-  if (frame.id === 0x102) {
-    return `Heartbeat ${(canI32(data, 0) >>> 0)} · Sender uptime ${(canI32(data, 4) >>> 0)} s`
-  }
-  return '—'
 }
 
 function formatCanTime(ms) {
@@ -903,10 +900,46 @@ const CanLog = memo(function CanLog({ onClose }) {
   )
 })
 
+function VehiclePanel({ vehicle, error, gps, gpsDetail }) {
+  const value = (v, suffix = '') => v == null ? '—' : typeof v === 'boolean' ? (v ? 'ON' : 'OFF') : `${v}${suffix}`
+  const groups = [
+    ['BCM', [
+      ['Steering', value(vehicle?.steeringDeg, '°')], ['Steering link', value(vehicle?.steeringLink)],
+      ['Pedal', value(vehicle?.acceleratorPct, '%')], ['Pedal ADC', value(vehicle?.acceleratorAdc)],
+      ['Throttle blocked', value(vehicle?.throttleBlocked)], ['Horn output', value(vehicle?.horn)],
+      ['Headlight output', value(vehicle?.headlight)], ['Immobilizer state', value(vehicle?.immoState)],
+    ]],
+    ['PCM', [
+      ['Motor 1', value(vehicle?.motor1)], ['Motor 2', value(vehicle?.motor2)],
+      ['Throttle out', value(vehicle?.throttleOut, '%')], ['Reverse active', value(vehicle?.reverseActive)],
+      ['Cruise active', value(vehicle?.cruiseActive)], ['ECO active', value(vehicle?.ecoActive)],
+      ['Hill active', value(vehicle?.hillActive)], ['Brake', value(vehicle?.brake)],
+    ]],
+    ['CCM switches', Object.entries(vehicle?.switches ?? {}).map(([name, on]) => [name, value(on)])],
+    ['TCU', [
+      ['GPS fix', gps.state === 'ok' ? 'YES' : 'NO'], ['Satellites', value(gpsDetail.satellites)],
+      ['Ignition', value(vehicle?.ignition)], ['Ignition uptime', value(vehicle?.ignitionUptime, ' s')],
+      ['Pitch', value(vehicle?.pitchDeg, '°')], ['Pitch valid', value(vehicle?.pitchValid)],
+      ['Hill request', value(vehicle?.hillRequest)], ['Hold throttle', value(vehicle?.holdPct, '%')], ['Summon active', value(vehicle?.summonActive)],
+    ]],
+  ]
+  return <section className="vehicle-panel" aria-label="Live CAN telemetry">
+    <header><h2>LIVE CAN TELEMETRY</h2><span>{error ? `Host unavailable: ${error}` : vehicle?.canReady ? `${vehicle.frames} frames received` : 'CAN module unavailable'}</span></header>
+    <div className="node-health">
+      {(vehicle?.nodes ?? [1, 2, 3, 4, 5].map(id => ({ id, alive: false }))).map(node =>
+        <span key={node.id} className={!node.alive ? 'offline' : node.status === 0 ? 'fault' : 'alive'}>NODE {node.id} {!node.alive ? 'OFFLINE' : node.status === 0 ? `ERROR ${node.error}` : 'ONLINE'}</span>)}
+    </div>
+    <div className="vehicle-groups">{groups.map(([title, rows]) =>
+      <div className="vehicle-group" key={title}><h3>{title}</h3><dl>{rows.map(([label, reading]) =>
+        <div key={label}><dt>{label}</dt><dd>{reading}</dd></div>)}</dl></div>)}</div>
+    <p>Speed is estimated from consecutive GPS fixes. A missing CAN signal is shown as —.</p>
+  </section>
+}
+
 function App() {
 
-  const [telemetry, setTelemetry] =
-    useState(initialTelemetry)
+  const [vehicle, setVehicle] = useState(null)
+  const [vehicleError, setVehicleError] = useState('')
 
   const [now, setNow] =
     useState(new Date())
@@ -942,108 +975,26 @@ function App() {
     course: null,
   })
 
-  /*
-   * Read potentiometer value
-   * from ESP32 #1.
-   *
-   * ESP32 API:
-   * /api/data
-   *
-   * Response:
-   * {"value": 75.4}
-   */
   useEffect(() => {
-
     const controller = new AbortController()
-    let cancelled = false
-    let frame = null
-    let pendingValue = null
-    let errorLogged = false
-
-    const commit = () => {
-      frame = null
-
-      if (cancelled || pendingValue === null) {
-        return
-      }
-
-      const value = pendingValue
-      pendingValue = null
-
-      setTelemetry((current) => ({
-        ...current,
-        speed: value,
-      }))
-    }
-
-    const scheduleCommit = () => {
-      if (frame === null) {
-        frame = requestAnimationFrame(commit)
-      }
-    }
-
-    const loadValue = async () => {
-
+    let active = true
+    let timer
+    async function poll() {
       try {
-
-        const data = await readApiJson('/api/data', controller.signal)
-
-        if (cancelled) return true
-
-        if (!Number.isFinite(data?.value)) {
-          throw new Error('Speed API returned no value')
-        }
-
-          pendingValue = Math.max(
-            0,
-            Math.min(MAX_SPEED, data.value)
-          )
-          scheduleCommit()
-
-        errorLogged = false
-        return true
-
+        const data = await readApiJson('/api/vehicle', controller.signal)
+        if (active) { setVehicle(data); setVehicleError('') }
       } catch (error) {
-
-        if (cancelled) return false
-        pendingValue = null
-        if (!errorLogged) console.warn('Speed API unavailable:', error)
-        errorLogged = true
-        if (!cancelled) setTelemetry((current) =>
-          current.speed === null ? current : { ...current, speed: null }
-        )
-        return false
-
-      }
-
-    }
-
-    const poll = async () => {
-      while (!cancelled) {
-        const startedAt = performance.now()
-        const connected = await loadValue()
-        const wait = Math.max(
-          0,
-          (connected ? DIAL_POLL_INTERVAL_MS : 500) - (performance.now() - startedAt)
-        )
-        await waitForPoll(wait, controller.signal)
+        if (active) { setVehicle(null); setVehicleError(error.message) }
+      } finally {
+        if (active) timer = setTimeout(poll, 500)
       }
     }
-
     poll()
-
-    return () => {
-      cancelled = true
-      controller.abort()
-      if (frame !== null) {
-        cancelAnimationFrame(frame)
-      }
-    }
-
+    return () => { active = false; clearTimeout(timer); controller.abort() }
   }, [])
 
   /*
-   * Read the GPS fix from ESP32 #2.
+   * Read the GPS fix forwarded by Node 4 over CAN.
    *
    * The Ready-to-Sky module is wired to
    * the second ESP32; that board parses
@@ -1335,7 +1286,7 @@ function App() {
 
   /*
    * A fix older than 5 s means the link
-   * to ESP32 #2 or the sky view dropped.
+   * to Node 4 or the sky view dropped.
    */
   const gps = useMemo(() => {
 
@@ -1416,10 +1367,10 @@ function App() {
             </div>
 
             <ClusterGauge
-              value={telemetry.speed}
-              max={MAX_SPEED}
-              unit="km/h"
-              label="DIAL SPEED"
+              value={Number.isFinite(vehicle?.throttleOut) ? vehicle.throttleOut : null}
+              max={100}
+              unit="%"
+              label="MOTOR THROTTLE"
               speed={0.18}
             />
 
@@ -1453,10 +1404,11 @@ function App() {
       
 
       </div>
+      </div>
 
+      <VehiclePanel vehicle={vehicle} error={vehicleError} gps={gps} gpsDetail={gpsDetail} />
       {canLogOpen && <CanLog onClose={closeCanLog} />}
 
-    </div>
     </div>
   )
 }

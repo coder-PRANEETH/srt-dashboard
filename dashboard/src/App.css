@@ -49,11 +49,8 @@
 
 * { box-sizing: border-box; }
 
-html, body, #root {
-  height: 100%;
-  margin: 0;
-  overflow-x: hidden;
-}
+html, body { margin: 0; min-height: 100%; overflow-x: hidden; }
+#root { min-height: 100dvh; }
 
 body {
   background: var(--cabin);
@@ -885,3 +882,26 @@ button { font: inherit; color: inherit; }
   .gps-pill .pulse-dot { animation: none; }
   .map-marker-arrow { transition: none; }
 }
+
+/* CAN state panel beneath the original cluster and offline map. */
+.app { height: auto; min-height: 100dvh; }
+.binnacle { flex: 0 0 auto; height: auto; min-height: 0; }
+.cluster { height: min(65vh, 680px); min-height: 390px; }
+.vehicle-panel { flex: 0 0 auto; margin: 0 12px 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: #0d1413; }
+.vehicle-panel header { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.vehicle-panel h2, .vehicle-group h3 { margin: 0; color: var(--cyan); letter-spacing: .08em; font-size: 13px; }
+.vehicle-panel header span, .vehicle-panel p { color: var(--ink-3); font-size: 11px; }
+.node-health { display: flex; flex-wrap: wrap; gap: 7px; margin: 14px 0; }
+.node-health span { border-radius: 20px; border: 1px solid; padding: 5px 9px; font-size: 10px; font-weight: 700; }
+.node-health .alive { color: var(--green); border-color: var(--green); }
+.node-health .offline { color: var(--red); border-color: var(--red); }
+.node-health .fault { color: var(--amber); border-color: var(--amber); }
+.vehicle-groups { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.vehicle-group { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: #101a19; }
+.vehicle-group h3 { margin-bottom: 8px; }
+.vehicle-group dl { margin: 0; }
+.vehicle-group dl div { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line-soft); }
+.vehicle-group dt { color: var(--ink-3); text-transform: capitalize; }
+.vehicle-group dd { margin: 0; font-weight: 700; text-align: right; }
+@media (max-width: 900px) { .vehicle-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .vehicle-groups { grid-template-columns: 1fr; } .vehicle-panel { flex: 0 0 auto; margin: 0 6px 10px; } }
