@@ -96,6 +96,9 @@ int main() {
   push(0x500, {1,85,0,1,0,0,0,0});
   push(0x600, {4,1,4,0,10,20,0,0});
   vehicle("node4"); sendGps(); record("gps");
+  // Invalid coordinates and IMU encoding must not replace the last good sample.
+  push(0x400, {90,1,0,79,0,0,1,8}); push(0x500, {1,181,0,1,0,0,0,0});
+  vehicle("invalid-domain"); sendDiagnostics(); record("diagnostics-domain");
   log("no-match", "1FFFFFFF"); log("invalid-filter", "301junk");
   for (int n = 0; n < 70; ++n) push(0x301, {uint8_t(n),0});
   log("ring", "301");
@@ -168,3 +171,9 @@ assert d['signals'][0]['ageMs'] == 116 and d['signals'][0]['fresh']
 assert d['unknownFrames'] == 1 and d['lastRxAgeMs'] == 0
 assert d['fsReady'] and d['fsUsed'] == 1500000 and d['txFailed'] == 2
 print('Diagnostics tests passed: counters, missing sensors, memory, storage, clock wrap')
+
+assert result('invalid-domain')['pitchDeg'] == -5
+assert result('diagnostics-domain')['malformedFrames'] == 7
+assert result('diagnostics-domain')['signals'][2]['invalid'] == 1
+assert result('diagnostics-domain')['signals'][4]['invalid'] == 1
+print('Invalid GPS and IMU payloads cannot replace valid samples')

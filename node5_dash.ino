@@ -73,7 +73,11 @@ void readCan() {
     }
     Sample *s = sampleFor(id);
     const uint8_t expectedLength = id == 0x300 ? 1 : id == 0x301 ? 2 : 8;
-    const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095);
+    const bool validGps = id != 0x400 || !data[6] ||
+      (data[0] <= 90 && data[3] <= 180 && be16(data+1) < 6000 && be16(data+4) < 6000 &&
+       (data[0] < 90 || be16(data+1) == 0) && (data[3] < 180 || be16(data+4) == 0));
+    const bool validPitch = id != 0x500 || !data[3] || data[1] <= 180;
+    const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095) && validGps && validPitch;
     if (s) { ++s->received; if (!validPayload) { ++s->invalid; ++malformedFrames; } }
     else if (id == 0x600) { if (len != 8 || data[0] < 1 || data[0] > 5) ++malformedFrames; }
     else ++unknownFrames;

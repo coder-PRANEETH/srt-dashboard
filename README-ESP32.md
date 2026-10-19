@@ -69,10 +69,24 @@ Upload each node sketch from its separate Arduino folder. For `node5_dash.ino`, 
 
 The accelerator gauge shows ADC full-scale percent (`floor(ADC × 100 / 4095)`), not measured motor output or calibrated pedal travel. GPIO34 voltage is an ADC-based estimate (`ADC × 3.3 / 4095`), not a calibrated voltage measurement. The switch panel shows all seven bits in the supplied order. Node 1 goes stale after 500 ms and Node 3 after 3000 ms, based on their data frames; no heartbeat is needed. Node 2 shows **NO TELEMETRY**, and its motor output is unavailable. Reverse request is labeled as a switch request, not confirmed relay feedback.
 
-`/api/vehicle` returns decoded data and node states. `/api/gps` returns a GPS fix, and `/api/data` returns speed estimated from successive fixes. Missing/stale signals are `null`. `/api/can-log` returns the latest 64 frames, with `data` containing exactly `dlc` bytes. Enter an exact hex ID such as `0x301` or `301` in **CAN LOG**; **Clear filter** restores all IDs. The API supports `/api/can-log?id=0x301`. Invalid IDs return HTTP 400. Filtering never changes reception or telemetry and applies to the existing 64-frame buffer.
+The home page contains driving instruments only: GPS speed, IMU pitch, accelerator ADC scale, trip, heading and satellites. **MAP** opens the offline map fullscreen; **CLOSE** or Escape returns. Its SRT opening animation runs once per tab session and honors reduced motion. The wheel follows **IMU pitch**, not steering angle; missing pitch freezes the last angle and shows unavailable.
+
+Open **http://192.168.4.1/status** directly for diagnostics (also `/status/`). There is deliberately no homepage link to it. Tap a node for its sensors, readings and freshness. Node 2 always shows unknown/no feedback. CAN log supports exact hex ID, node, message/raw-byte search and issues-only filters. **RESET** clears filters. **PAUSE** freezes the browser snapshot while CAN reception continues; **COPY** and **EXPORT** include filtered frames, diagnostics and recent events. The browser retains at most 64 frames, 24 fault transitions and 600 route points.
+
+`/api/vehicle` returns decoded data and node states. `/api/gps` returns a GPS fix; `/api/data` returns speed estimated from successive fixes. Missing/stale signals are `null`. `/api/can-log` returns the latest 64 frames, `uptimeMs`, and exactly `dlc` bytes per frame. The optional exact hex filter `/api/can-log?id=0x301` still works; invalid IDs return HTTP 400. `/api/diagnostics` returns per-signal freshness, invalid-payload counts, total RX/TX/errors, free/minimum/largest heap block, LittleFS usage and WiFi clients. `/status` now returns HTML, not JSON; consumers of its old JSON must use `/api/vehicle`.
 
 ## Automated checks
 
 For the receiver/API regression checks, run `python3 dashboard/tools/test-can-protocol.py` from the repository root (requires `g++`). This compiles the actual Node 5 decoder/API functions against a simulated CAN bus and checks endian order, all switch bits, data expiry, invalid frames, log filtering and clock wraparound. `dashboard/tools/smoke-packed.cjs` checks the packed website in Playwright, including the mobile CAN filter and missing-data display.
 
 The GPS `0x400` format has no coordinate sign bits; Node 4 reports a fix only for nonnegative coordinates. Firmware compilation and simulated/browser checks do not test physical boards, wiring or sensors.
+
+
+### Redesign validation (2026-10-19)
+
+- Node 5 compiled with ESP32 core 3.3.11, `esp32:esp32:esp32:PartitionScheme=no_ota`.
+- Firmware uses 994,540 bytes (47%) of the 2,097,152-byte application partition; static RAM uses 49,336 bytes (15%) of 327,680 bytes.
+- Packed frontend JS/CSS is about 119 KB gzip. Local tiles remain included. The packer estimates 1.46 MiB of file blocks, a 64 KiB metadata reserve and 356 KiB headroom.
+- A real LittleFS image was successfully created with `mklittlefs -c data -b 4096 -p 256 -s 1966080 build/srt-littlefs.bin`. Partition size is 1,966,080 bytes, offset `0x210000`, for the specified No OTA layout.
+- Lint, native CAN/API regression tests, decoder/route tests and packed-site browser tests pass. Browser tests cover 320/390 px phones, 800×480, desktop, map lazy loading, routes, stale data, IMU freeze, filters, pause/resume, copy/export and API recovery.
+- These are compile, image and simulated-browser checks. On-device runtime heap and actual bus/WiFi behavior still require the physical ESP32; inspect Node 5 on `/status` during operation.
