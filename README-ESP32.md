@@ -1,21 +1,63 @@
 # SRT CAN dashboard and vehicle nodes
 
-Five classic ESP32 vehicle nodes share a 500 kbps CAN bus. A separate steering IMU ESP32 sends its angle wirelessly to Node 1 by ESP-NOW. The Node 5 ESP32 hosts the offline dashboard over its WiFi access point. `dashboard` and `car_fleet` are the two website sources. Each `nodeN_*` folder, plus `steering_imu_esp`, has a `test` sketch for bench diagnostics and a `production` sketch for its role.
+Five classic ESP32 nodes share a 500 kbps CAN bus. Nodes 1–3 use the supplied working accelerator, motor controller and switch sketches. Node 4 sends GPS, ignition and pitch. Node 5 hosts the offline dashboard and CAN log over WiFi.
 
-Every test and production `.ino` starts with its own connection list and verification procedure. Test sketches run on one board at a time: Nodes 1-5 use MCP2515 internal loopback, so no second CAN node or CANH/CANL bus is required. Loopback checks the local SPI controller path, not the external transceiver or bus wiring.
+## Current CAN protocol
 
-## Wiring and build
+| Sender | ID | DLC | Data | Timing |
+| --- | --- | --- | --- | --- |
+| Node 1 | `0x301` | 2 | Raw ADC 0–4095, **little-endian**: low byte then high byte | Every 50 ms |
+| Node 3 | `0x300` | 1 | Switch bitmask: cruise=0, ECO=1, reverse=2, hill=3, horn=4, **headlight=5, autonomous=6** | On change after 25 ms debounce, plus every 1 s |
+| Node 4 | `0x400` | 8 | GPS degrees/minutes, fix and satellites | Every 1 s |
+| Node 4 | `0x401` | 8 | Ignition and on-time | Every 1 s |
+| Node 4 | `0x500` | 8 | Hill request, pitch and validity, hold=0% | 50 ms with hill requested, otherwise 500 ms |
+| Nodes 4/5 | `0x600` | 8 | Node heartbeat and counters | Every 1 s |
 
-All MCP2515 modules: GPIO18 SCK, GPIO19 MISO, GPIO23 MOSI, GPIO25 CS, GPIO27 INT. The sketches select an **8 MHz MCP2515 oscillator**. Confirm the module crystal; change `MCP_8MHZ` in each sketch's `CanCommon.h` if it is 16 MHz. Use 3.3 V compatible logic on ESP32 inputs, twisted CANH/CANL, common ground, and one 120 Ω terminator at each bus end.
+**Node 2 receives only:** the supplied motor sketch sends no motor status or heartbeat. Nodes 1 and 3 also send no heartbeat. The old eight-byte `0x300`/`0x301` layouts and Node 1 `0x303` pedal calibration diagnostic are no longer used. Old-format frames remain visible in the CAN log, but do not update accelerator/switch telemetry.
 
-- Node 1 BCM: GPIO34 pedal ADC, GPIO16/17 Pi5 UART, ESP-NOW steering receiver on WiFi channel 1, GPIO13 horn, GPIO32 LPWM and GPIO33 RPWM on the BTS7960 steering driver. The MPU6050 is **not** on Node 1. The headlight output is intentionally unused.
-- Node 2 PCM: GPIO13/14 motor PWM, GPIO26/33 reverse relays. **GPIO22 brake sensing has been removed.**
-- Node 3 CCM: active-low switches to ground on GPIO4/5/13/14/26/32/33.
-- Node 4 TCU: GPS TX to GPIO16, ignition logic to GPIO34, MPU6050 SDA/SCL to GPIO21/22. The IMU X-axis is treated as longitudinal for pitch; verify its mounting sign on the bench.
-- Node 5 DASH: MCP2515 plus WiFi; no local speed potentiometer.
-- Steering IMU ESP32: MPU6050 SDA/SCL on GPIO21/22, ESP-NOW transmitter on channel 1; it is not connected to CAN.
+Node 2 decodes reverse from bit 2 and maps the little-endian accelerator ADC to PWM on GPIO13/14. `ACCEL_MIN_ADC=0` and `ACCEL_MAX_ADC=4095` are the supplied mapping endpoints. Reverse relays are **active LOW**: GPIO33/26 LOW=ON, HIGH=OFF. Production runs the supplied motor control logic, including its zero-throttle step before direction changes, 500 ms accelerator timeout and 3000 ms switch timeout. Unlike the previous firmware, production PWM and reverse outputs are enabled. The switch timeout resets throttle and selects forward; subsequent accelerator frames follow the supplied controller logic.
 
-Open each `test` or `production` folder as a separate Arduino sketch. Install the ESP32 board package, `mcp_can`, `TinyGPSPlus`, `Adafruit_MPU6050`, `Adafruit_Sensor`, and `Adafruit_BusIO`. Use a classic ESP32 Dev Module; Node 5 also needs the **No OTA (2MB APP/2MB SPIFFS)** partition and LittleFS uploader. Build the site and pack its assets:
+## Wiring
+
+All MCP2515 modules: GPIO18 SCK, GPIO19 MISO, GPIO23 MOSI, GPIO25 CS. The common helper used by Nodes 4/5 also configures GPIO27 INT. Use 500 kbps and match the configured **8 MHz crystal** to the module. Connect common grounds and CANH/CANL, with 120 Ω termination at each physical end and 3.3 V-compatible ESP32 logic.
+
+- Node 1: GPIO34 accelerator only. No steering motor, horn, wireless or Pi UART code. The 1.1–4.52 V sensor output needs the existing divider: **10 kΩ from pedal OUT to GPIO34, 15 kΩ from GPIO34 to GND**. Expected pin voltage is about 0.66–2.71 V. Never connect the 4.52 V output directly to the ESP32. The new code sends raw ADC; it does not use saved NVS calibration.
+- Node 2: PWM GPIO13/14, active-low reverse relays GPIO33/26. No brake input.
+- Node 3: active-low switches to ground: cruise GPIO4, ECO GPIO5, reverse GPIO13, hill GPIO14, horn GPIO26, headlight GPIO33, autonomous GPIO32. Release the GPIO4/5 switches during boot.
+- Node 4: GPS TX to GPIO16 at 9600 baud; conditioned ignition input GPIO34; MPU6050 SDA/SCL GPIO21/22. Its hill receiver reads bit 3 of the new one-byte switch frame and allows the 1 s broadcast interval before timing out at 3 s.
+- Node 5: MCP2515, WiFi AP and LittleFS dashboard; no local speed sensor.
+
+## Serial diagnosis
+
+Open Serial Monitor at **115200 baud** for every node. Successful transmissions and received project messages print named values and units, not packed payload bytes. Timestamped lines identify direction (`CAN TX` or `CAN RX`), CAN ID and DLC. Examples:
+
+```text
+[1000 ms] CAN TX ID=0x301 DLC=2 | accelerator ADC=2000/4095 | voltage estimate=1.612 V
+[1000 ms] CAN TX ID=0x300 DLC=1 | Cruise: ON | ECO: OFF | Reverse: ON | Hill Hold: OFF | Horn: OFF | Headlight: ON | Autonomous: OFF
+[1000 ms] CAN RX ID=0x301 DLC=2 | ADC=2000/4095 | throttle=48% PWM=122/255 | reverse=ON
+```
+
+- Node 1 reports live ADC, estimated voltage, successful/failed sends and time since its last successful send every 250 ms.
+- Node 2 reports received ADC and switch values, throttle percent/PWM, relay polarity/state, input ages, timeouts, and receive counts. It explicitly identifies itself as receive-only.
+- Node 3 prints every named switch after debounce and successful sends, plus counters and pending-send failures every 250 ms. Initialization failures retry every second.
+- Nodes 4/5 print decoded RX/TX values, controller setup attempts, send failures (rate-limited to once per second), and a one-second controller summary. Node 5 also prints WiFi clients, filesystem state and Node 1/3 freshness.
+Heartbeat byte counters wrap at 256; the local Serial totals use 32-bit counters.
+
+A successful controller initialization checks SPI/controller setup; physical CAN sends need another active node to acknowledge them. TX failures report wiring/termination/peer checks.
+
+## Dashboard and upload
+
+The repository root contains the five working sketches:
+
+- `node1_bcm.ino`: accelerator sender.
+- `node2_pcm.ino`: motor controller.
+- `node3_ccm.ino`: switch sender.
+- `node4_tcu.ino`: GPS, ignition and pitch.
+- `node5_dash.ino`: WiFi dashboard and CAN log.
+
+`CanCommon.h` is shared by Nodes 4/5. Temporary test sketches and the standalone CAN monitor have been removed.
+
+Compile each node separately: Arduino combines all `.ino` files in a sketch folder, so do not compile the repository root as one sketch. Copy the desired `.ino` into a separate folder with the same base name (for example, `node4_tcu/node4_tcu.ino`) outside this repository. For Nodes 4/5, copy `CanCommon.h` into that folder too. For Node 5, copy the rebuilt root `data/` directory into its sketch folder before uploading LittleFS. Open that individual sketch in Arduino IDE. Use classic **ESP32 Dev Module**, with the ESP32 board package, `mcp_can`, `TinyGPSPlus`, `Adafruit_MPU6050`, `Adafruit_Sensor` and `Adafruit_BusIO` libraries. Node 5 needs **No OTA (2MB APP/2MB SPIFFS)** and a LittleFS uploader.
 
 ```bash
 cd dashboard
@@ -23,16 +65,14 @@ npm ci
 npm run build:esp
 ```
 
-Upload `node5_dash/production/production.ino`, then upload `node5_dash/production/data/` as **LittleFS**. The packer gzips HTML, CSS, JS, and SVG and keeps the `.gz` names; do not manually recompress the folder. Connect to WiFi `srt-dash` (initial password `12345678`, change in the Node 5 sketch) and open `http://192.168.4.1`.
+Upload each node sketch from its separate Arduino folder. For `node5_dash.ino`, upload the rebuilt `data/` folder as **LittleFS**; keep the `.gz` filenames. Join `srt-dash` with the configured initial password `12345678`, then open `http://192.168.4.1`.
 
-Node 5 APIs: `/api/vehicle` exposes decoded CAN signals and five node health states, `/api/gps` exposes the current fix, `/api/data` exposes speed estimated from successive GPS fixes, and `/api/can-log` exposes the latest 64 frames. Values become `null` when the related frame is stale; heartbeats go offline after 3 seconds. The CAN matrix does not define a vehicle speed signal, so GPS speed is an estimate and stays unavailable until two usable fixes arrive.
+The accelerator gauge shows ADC full-scale percent (`floor(ADC × 100 / 4095)`), not measured motor output or calibrated pedal travel. GPIO34 voltage is an ADC-based estimate (`ADC × 3.3 / 4095`), not a calibrated voltage measurement. The switch panel shows all seven bits in the supplied order. Node 1 goes stale after 500 ms and Node 3 after 3000 ms, based on their data frames; no heartbeat is needed. Node 2 shows **NO TELEMETRY**, and its motor output is unavailable. Reverse request is labeled as a switch request, not confirmed relay feedback.
 
-## Bench and activation notes
+`/api/vehicle` returns decoded data and node states. `/api/gps` returns a GPS fix, and `/api/data` returns speed estimated from successive fixes. Missing/stale signals are `null`. `/api/can-log` returns the latest 64 frames, with `data` containing exactly `dlc` bytes. Enter an exact hex ID such as `0x301` or `301` in **CAN LOG**; **Clear filter** restores all IDs. The API supports `/api/can-log?id=0x301`. Invalid IDs return HTTP 400. Filtering never changes reception or telemetry and applies to the existing 64-frame buffer.
 
-Open each test sketch's Serial Monitor at 115200. Nodes 1-5 print local CAN loopback sent/pass counts using test IDs `0x7A1` through `0x7A5`; both counts should rise on the single board. Node 1 checks its pedal ADC, ESP-NOW radio initialization, and UART with a temporary GPIO17-to-GPIO16 jumper. Its keyboard motor check is `m` to arm for five seconds, then `l` or `r` for one 25% PWM pulse lasting 250 ms; `s` stops immediately. The horn test is `m` then `h`. Node 2 uses `m` then `1`/`2` for PWM or `3`/`4` for relay input pulses, with `s` for stop. Each pulse consumes the arm. Keep steering movement clear and use a fused 12 V motor supply for the motor check; start with a meter on output pins. Node 3 checks each switch, Node 4 checks GPS/ignition/MPU6050, and Node 5 checks its access point and LittleFS. The steering IMU test checks its own MPU6050 and radio initialization without sending to Node 1. A single board cannot prove the external CAN transceiver or ESP-NOW delivery; use production firmware on both ends for the integration check.
+## Automated checks
 
-The steering IMU production sketch targets Node 1 MAC `30:76:F5:94:6A:60`, supplied with the working wireless pair. Confirm `node1_bcm/test` prints that same MAC. Production sender and receiver use the packed `{uint32_t sequence; float steeringAngle;}` payload on WiFi channel 1. The sender calibrates the MPU6050 gyro while still, samples I2C at 400 kHz, and sends every 10 ms; Node 1 queues received packets, reports the latest angle over CAN every 20 ms, and marks the wireless reading stale after 500 ms without a packet.
+For the receiver/API regression checks, run `python3 dashboard/tools/test-can-protocol.py` from the repository root (requires `g++`). This compiles the actual Node 5 decoder/API functions against a simulated CAN bus and checks endian order, all switch bits, data expiry, invalid frames, log filtering and clock wraparound. `dashboard/tools/smoke-packed.cjs` checks the packed website in Playwright, including the mobile CAN filter and missing-data display.
 
-The Node 1 horn relay is configured active high: GPIO13 sends 3.3 V to the relay input while the CAN horn request is fresh. The relay switches the separate 12 V horn supply. Production traction and reverse relay outputs remain locked by default. They require motor PWM limits, bench validation, and an explicit constant change in the Node 2 production sketch. Reverse relay inputs are active high at 3.3 V as confirmed by the user. The 12 V BTS7960 steering driver uses GPIO32 LPWM and GPIO33 RPWM, with both enable inputs tied to 5 V. Add external pulldowns on LPWM/RPWM so the motor stays off during ESP32 reset and boot; the Node 1 production sketch drives both low once running. Closed-loop angle targets and end stops still need confirmation. Production steering drive, remote immobilization, cruise throttle hold, hill hold throttle, and summon actuation stay inactive because the supplied pin sheets/matrix do not define a safe closed-loop controller or secure command authentication. Node 4 sends valid measured pitch in 0x500 when its MPU6050 responds, while holding throttle remains zero. Telemetry for defined frames is active. Brake is unavailable after removal of its input.
-
-The 0x400 GPS format has no latitude/longitude sign bits; Node 4 therefore sends a fix only for nonnegative coordinates. No physical boards were available for validation; compile and browser checks do not prove wiring, sensor operation, or actuator safety.
+The GPS `0x400` format has no coordinate sign bits; Node 4 reports a fix only for nonnegative coordinates. Firmware compilation and simulated/browser checks do not test physical boards, wiring or sensors.

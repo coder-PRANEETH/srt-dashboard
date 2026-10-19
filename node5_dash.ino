@@ -4,13 +4,15 @@ Connections:
   MCP2515 wiring listed below links this host to the five-node CAN bus.
   No local speed sensor/potentiometer is connected. WiFi serves the site.
   Use classic ESP32 Dev Module with No OTA (2 MB APP / 2 MB SPIFFS).
-  Upload this sketch AND compressed production/data as LittleFS; packing
+  Upload this sketch AND compressed data/ as LittleFS; packing
   is done from dashboard with npm run build:esp. Do not rename .gz files.
 Verification:
   Join SSID srt-dash, initial password 12345678, then visit
   http://192.168.4.1/ and /api/vehicle, /api/gps, /api/can-log.
   Dashboard should load from LittleFS; /api/can-log frame count and
-  heartbeat 0x600 nodes should appear once the CAN peers are active.
+  Node 1/3 activity should appear from 0x301/0x300 without heartbeats.
+  /api/vehicle shows little-endian pedal ADC, ADC-scale percent and an
+  estimated GPIO voltage. Node 2 is receive-only; its health is unknown.
   /api/gps shows a fix only after valid 0x400; /api/data speed needs two
   successive usable GPS fixes. Change the initial AP password in code.
 
@@ -29,7 +31,7 @@ Shared CAN connection (classic ESP32 + MCP2515):
 #include <LittleFS.h>
 #include <math.h>
 
-// Upload this sketch AND node5_dash/production/data with LittleFS (No OTA partition).
+// Upload this sketch AND data/ with LittleFS (No OTA partition).
 const char *AP_SSID = "srt-dash";
 const char *AP_PASS = "12345678"; // Change before deployment.
 WebServer server(80);
@@ -49,6 +51,7 @@ Sample *sampleFor(uint32_t id) {
   return nullptr;
 }
 bool fresh(const Sample *s, uint32_t timeout) { return s && s->seen && millis() - s->at < timeout; }
+uint16_t le16(const uint8_t *b) { return b[0] | ((uint16_t)b[1] << 8); }
 uint16_t be16(const uint8_t *b) { return ((uint16_t)b[0] << 8) | b[1]; }
 float degToRad(float deg) { return deg * 0.01745329252f; }
 float distanceMeters(float a, float b, float c, float d) {
@@ -69,7 +72,9 @@ void readCan() {
       n.seen = true; n.at = now; n.status = data[1]; n.error = data[3]; n.tx = data[4]; n.rx = data[5];
     }
     Sample *s = sampleFor(id);
-    if (s && len == 8) {
+    const uint8_t expectedLength = id == 0x300 ? 1 : id == 0x301 ? 2 : 8;
+    const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095);
+    if (s && validPayload) {
       memcpy(s->bytes, data, 8); s->len = len; s->at = now; s->seen = true;
       if (id == 0x400) {
         if (data[6] && data[0] <= 90 && data[3] <= 180 && be16(data+1) < 6000 && be16(data+4) < 6000) {
@@ -114,8 +119,8 @@ void sendVehicle() {
   Sample *steer=sampleFor(0x100), *lamps=sampleFor(0x101), *immo=sampleFor(0x151), *cmd=sampleFor(0x200);
   Sample *motor=sampleFor(0x201), *sw=sampleFor(0x300), *accel=sampleFor(0x301), *brake=sampleFor(0x302);
   Sample *ign=sampleFor(0x401), *hill=sampleFor(0x500), *summon=sampleFor(0x501);
-  bool a=fresh(steer, 250), l=fresh(lamps, 500), m=fresh(motor, 250), s=fresh(sw, 250);
-  bool p=fresh(accel, 250), b=fresh(brake, 250), i=fresh(ign, 3000), h=fresh(hill, 1000);
+  bool a=fresh(steer, 250), l=fresh(lamps, 500), m=fresh(motor, 250), s=fresh(sw, 3001);
+  bool p=fresh(accel, 501), b=fresh(brake, 250), i=fresh(ign, 3000), h=fresh(hill, 1000);
   String j; j.reserve(1600);
   j = "{\"canReady\":"; j += canReady ? "true" : "false";
   j += ",\"frames\":" + String(frameCount);
@@ -132,9 +137,11 @@ void sendVehicle() {
   j += ",\"cruiseActive\":" + maybeBool(m, motor->bytes[4]);
   j += ",\"ecoActive\":" + maybeBool(m, motor->bytes[5]);
   j += ",\"hillActive\":" + maybeBool(m, motor->bytes[6]);
-  j += ",\"acceleratorAdc\":" + maybeNumber(p, be16(accel->bytes));
-  j += ",\"acceleratorPct\":" + maybeNumber(p, accel->bytes[2]);
-  j += ",\"throttleBlocked\":" + maybeBool(p, accel->bytes[3]);
+  const uint16_t adc = le16(accel->bytes);
+  j += ",\"acceleratorAdc\":" + maybeNumber(p, adc);
+  // Display ADC full-scale percent, not a measured motor output or calibrated pedal travel.
+  j += ",\"acceleratorPct\":" + maybeNumber(p, (uint32_t)adc * 100 / 4095);
+  j += ",\"acceleratorVoltageEstimate\":" + maybeNumber(p, adc * (3.3f / 4095.0f), 3);
   j += ",\"brake\":" + maybeBool(b, brake->bytes[0]);
   j += ",\"ignition\":" + maybeBool(i, ign->bytes[0]);
   j += ",\"ignitionUptime\":" + maybeNumber(i, be16(ign->bytes+1));
@@ -143,32 +150,71 @@ void sendVehicle() {
   j += ",\"pitchValid\":" + maybeBool(h, hill->bytes[3]);
   j += ",\"holdPct\":" + maybeNumber(h, hill->bytes[2]);
   j += ",\"summonActive\":" + maybeBool(fresh(summon, 250), summon->bytes[4]);
-  const char *names[] = {"cruise","eco","reverse","hill","horn","autonomous","headlight"};
+  const char *names[] = {"cruise","eco","reverse","hill","horn","headlight","autonomous"};
   j += ",\"switches\":{";
-  for (uint8_t n=0; n<7; ++n) { if (n) j += ','; j += "\"" + String(names[n]) + "\":" + maybeBool(s, sw->bytes[n]); }
+  for (uint8_t n=0; n<7; ++n) { if (n) j += ','; j += "\"" + String(names[n]) + "\":" + maybeBool(s, sw->bytes[0] & (1U << n)); }
   j += "},\"nodes\":[";
   for (uint8_t n=1; n<=5; ++n) {
     if (n>1) j += ',';
-    bool alive = n==5 ? canReady : nodes[n].seen && millis()-nodes[n].at < 3000;
-    j += "{\"id\":" + String(n) + ",\"alive\":" + (alive ? "true" : "false");
-    j += ",\"status\":" + String(n==5 ? (canReady?1:0) : nodes[n].status);
-    j += ",\"error\":" + String(n==5 ? (canReady?0:1) : nodes[n].error);
-    j += ",\"tx\":" + String(n==5 ? canTxCount : nodes[n].tx);
-    j += ",\"rx\":" + String(n==5 ? canRxCount : nodes[n].rx);
-    j += ",\"ageMs\":" + (n==5 ? String(0) : (nodes[n].seen ? String(millis()-nodes[n].at) : "null"));
+    if (n == 2) {
+      // This supplied motor controller receives frames but transmits no status.
+      j += "{\"id\":2,\"alive\":null,\"source\":\"receive-only\",\"status\":null,\"error\":null,\"tx\":null,\"rx\":null,\"ageMs\":null}";
+      continue;
+    }
+    if (n == 1 || n == 3) {
+      const Sample *signal = n == 1 ? accel : sw;
+      const bool alive = n == 1 ? p : s;
+      j += "{\"id\":" + String(n) + ",\"alive\":" + (alive ? "true" : "false");
+      j += ",\"source\":\"data\",\"status\":null,\"error\":null,\"tx\":null,\"rx\":null";
+      j += ",\"ageMs\":" + (signal->seen ? String(millis() - signal->at) : "null");
+    } else {
+      const bool alive = n == 5 ? canReady : nodes[n].seen && millis() - nodes[n].at < 3000;
+      j += "{\"id\":" + String(n) + ",\"alive\":" + (alive ? "true" : "false");
+      j += ",\"source\":\"" + String(n == 5 ? "local" : "heartbeat") + "\"";
+      j += ",\"status\":" + String(n == 5 ? (canReady ? 1 : 0) : nodes[n].status);
+      j += ",\"error\":" + String(n == 5 ? (canReady ? 0 : 1) : nodes[n].error);
+      j += ",\"tx\":" + String(n == 5 ? canTxCount : nodes[n].tx);
+      j += ",\"rx\":" + String(n == 5 ? canRxCount : nodes[n].rx);
+      j += ",\"ageMs\":" + (n == 5 ? String(0) : (nodes[n].seen ? String(millis()-nodes[n].at) : "null"));
+    }
     j += '}';
   }
   j += "]}";
   jsonHeader(); server.send(200, "application/json", j);
 }
 void sendCanLog() {
+  // Optional exact ID filter in hexadecimal, e.g. ?id=0x301 or ?id=301.
+  // Filtering this response never changes CAN reception or vehicle telemetry.
+  String filter = server.arg("id"); filter.trim();
+  const bool filtered = filter.length() > 0;
+  uint32_t filterId = 0;
+  if (filtered) {
+    unsigned start = filter.startsWith("0x") || filter.startsWith("0X") ? 2 : 0;
+    bool valid = filter.length() > start && filter.length() - start <= 8;
+    for (unsigned i = start; valid && i < filter.length(); ++i) {
+      const char c = filter[i];
+      const int digit = c >= '0' && c <= '9' ? c - '0' :
+                        c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                        c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+      if (digit < 0) valid = false;
+      else filterId = (filterId << 4) | (uint32_t)digit;
+    }
+    if (!valid || filterId > 0x1FFFFFFFUL) {
+      jsonHeader(); server.send(400, "application/json", "{\"error\":\"id must be hex from 0 to 1FFFFFFF\"}");
+      return;
+    }
+  }
   readCan(); String j; j.reserve(9500);
   j = "{\"ready\":"; j += canReady ? "true" : "false";
   j += ",\"total\":" + String(frameCount) + ",\"frames\":[";
+  bool first = true;
   for (uint8_t n=0; n<logCount; ++n) {
-    const LogFrame &f=logFrames[(logNext+64-logCount+n)%64]; if (n) j += ',';
+    const LogFrame &f=logFrames[(logNext+64-logCount+n)%64];
+    if (filtered && f.id != filterId) continue;
+    if (!first) j += ',';
+    first = false;
     j += "{\"seq\":"+String(f.seq)+",\"ms\":"+String(f.ms)+",\"id\":"+String(f.id)+",\"dlc\":"+String(f.len)+",\"data\":[";
-    for (uint8_t k=0;k<8;++k) { if (k) j+=','; j+=String(f.bytes[k]); }
+    for (uint8_t k=0;k<f.len;++k) { if (k) j+=','; j+=String(f.bytes[k]); }
     j += "]}";
   }
   j += "]}"; jsonHeader(); server.send(200, "application/json", j);
@@ -201,7 +247,7 @@ bool sendFile(String path) {
 void setup() {
   Serial.begin(115200);
   fsReady = LittleFS.begin(false);
-  if (!fsReady) Serial.println("LittleFS unavailable: upload node5_dash/production/data");
+  if (!fsReady) Serial.println("LittleFS unavailable: upload data/");
   if (!canBegin()) Serial.println("CAN unavailable: check MCP2515 wiring/crystal");
   WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID, AP_PASS); WiFi.setSleep(false);
   server.on("/api/data", sendSpeed); server.on("/api/gps", sendGps);
@@ -217,5 +263,9 @@ void setup() {
 }
 void loop() {
   readCan(); server.handleClient(); readCan();
-  if (millis()-lastBeat >= 1000) { lastBeat=millis(); canHeartbeat(5, canReady?1:0, canReady?0:1); }
+  if (millis()-lastBeat >= 1000) { lastBeat=millis(); canPrintStatus("Node 5 dashboard");
+    Serial.printf("Dashboard: WiFi clients=%u LittleFS=%s buffered frames=%u total frames=%lu | Node 1=%s Node 3=%s | Node 2=receive-only\n",
+                  WiFi.softAPgetStationNum(), fsReady ? "READY" : "MISSING", logCount, (unsigned long)frameCount,
+                  fresh(sampleFor(0x301), 501) ? "LIVE" : "NO RECENT DATA", fresh(sampleFor(0x300), 3001) ? "LIVE" : "NO RECENT DATA");
+    canHeartbeat(5, canReady?1:0, canReady?0:1); }
 }

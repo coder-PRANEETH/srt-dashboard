@@ -38,17 +38,26 @@ uint32_t lastImuRetry = 0;
 constexpr uint8_t GPS_RX = 16, IGN_PIN = 34;
 constexpr uint8_t IGN_ACTIVE_LEVEL = HIGH; // External 12 V ignition requires level shifting.
 uint32_t ignOnAt = 0, lastGps = 0, lastIgn = 0, lastHill = 0, lastBeat = 0, switchAt = 0;
-bool lastIgnState = false, hillRequest = false;
+bool lastIgnState = false, hillRequest = false, switchSeen = false;
+bool startImu() {
+  for (const uint8_t address : {uint8_t(0x68), uint8_t(0x69)}) {
+    if (!imu.begin(address)) continue;
+    imu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    imu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    Serial.printf("MPU6050 ready at I2C 0x%02X\n", address);
+    return true;
+  }
+  return false;
+}
 void setup() {
   Serial.begin(115200);
   pinMode(IGN_PIN, INPUT);
+  gpsSerial.setRxBufferSize(1024);
   gpsSerial.begin(9600, SERIAL_8N1, GPS_RX, -1);
   Wire.begin(21, 22);
-  imuReady = imu.begin();
-  if (imuReady) {
-    imu.setAccelerometerRange(MPU6050_RANGE_8_G);
-    imu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-  } else Serial.println("MPU6050 not detected on GPIO21/22; pitch invalid");
+  Wire.setTimeOut(50);
+  imuReady = startImu();
+  if (!imuReady) Serial.println("MPU6050 not detected at I2C 0x68/0x69 on GPIO21/22; pitch invalid");
   if (!canBegin()) Serial.println("CAN unavailable");
   Serial.println("Node 4 TCU: GPS, ignition and MPU6050 pitch telemetry");
 }
@@ -56,8 +65,8 @@ void loop() {
   const uint32_t now = millis();
   while (gpsSerial.available()) gps.encode(gpsSerial.read());
   uint32_t id; uint8_t len, data[8];
-  while (canRead(id, len, data)) if (id == 0x300 && len == 8) { hillRequest = data[3] != 0; switchAt = now; }
-  const bool hillEnabled = switchAt && now - switchAt < 250 && hillRequest;
+  while (canRead(id, len, data)) if (id == 0x300 && len == 1) { hillRequest = (data[0] & (1U << 3)) != 0; switchAt = now; switchSeen = true; }
+  const bool hillEnabled = switchSeen && now - switchAt <= 3000 && hillRequest;
   if (now - lastGps >= 1000) {
     lastGps = now;
     uint8_t p[8] = {};
@@ -85,11 +94,7 @@ void loop() {
   }
   if (!imuReady && now - lastImuRetry >= 5000) {
     lastImuRetry = now;
-    imuReady = imu.begin();
-    if (imuReady) {
-      imu.setAccelerometerRange(MPU6050_RANGE_8_G);
-      imu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-    }
+    imuReady = startImu();
   }
   if (now - lastHill >= (hillEnabled ? 50U : 500U)) {
     lastHill = now;
@@ -110,5 +115,5 @@ void loop() {
                     (uint8_t)pitchValid, 0, 0, 0, 0};
     canSend(0x500, h);
   }
-  if (now - lastBeat >= 1000) { lastBeat = now; canHeartbeat(4, canReady && imuReady ? 1 : 0, !canReady ? 1 : (!imuReady ? 2 : 0)); }
+  if (now - lastBeat >= 1000) { lastBeat = now; canPrintStatus("Node 4 GPS/ignition/IMU"); canHeartbeat(4, canReady && imuReady ? 1 : 0, !canReady ? 1 : (!imuReady ? 2 : 0)); }
 }

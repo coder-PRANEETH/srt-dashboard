@@ -432,7 +432,7 @@ function ClusterGauge({
 
       </div>
 
-   
+
 
     </div>
   )
@@ -786,8 +786,20 @@ function canU16(data, offset) {
 
 function describeCanFrame(frame) {
   const d = frame.data
-  if (!Array.isArray(d) || d.length !== 8) return '—'
+  if (!Array.isArray(d) || d.length !== frame.dlc || frame.dlc < 0 || frame.dlc > 8) return 'Invalid CAN payload'
   const on = (v) => v ? 'ON' : 'OFF'
+  if (frame.id === 0x301) {
+    if (frame.dlc !== 2) return 'Invalid accelerator payload: expected DLC 2'
+    const adc = d[0] | (d[1] << 8)
+    if (adc > 4095) return 'Invalid accelerator ADC: expected 0–4095'
+    return `Pedal ADC ${adc}/4095 · ${Math.floor(adc * 100 / 4095)}% ADC scale · voltage estimate ${(adc * 3.3 / 4095).toFixed(3)} V`
+  }
+  if (frame.id === 0x300) {
+    if (frame.dlc !== 1) return 'Invalid switch payload: expected DLC 1'
+    const bit = (index) => on(d[0] & (1 << index))
+    return `Cruise ${bit(0)} · ECO ${bit(1)} · reverse ${bit(2)} · hill ${bit(3)} · horn ${bit(4)} · headlight ${bit(5)} · autonomous ${bit(6)}`
+  }
+  if (frame.dlc !== 8) return 'Unknown CAN ID or payload length'
   switch (frame.id) {
     case 0x100: {
       const raw = canU16(d, 0)
@@ -797,8 +809,6 @@ function describeCanFrame(frame) {
     case 0x151: return `Immobilizer ${d[0]} · blocked ${on(d[1])} · token ${d[2]}`
     case 0x200: return `Immobilizer command ${d[0]} · source ${d[1]} · token ${d[2]}`
     case 0x201: return `Motors ${on(d[0])}/${on(d[1])} · reverse ${on(d[2])} · throttle ${d[3]}% · cruise ${on(d[4])} · ECO ${on(d[5])} · hill ${on(d[6])}`
-    case 0x300: return `Cruise ${on(d[0])} · ECO ${on(d[1])} · reverse ${on(d[2])} · hill ${on(d[3])} · horn ${on(d[4])} · auto ${on(d[5])} · lights ${on(d[6])}`
-    case 0x301: return `Pedal ADC ${canU16(d, 0)} · ${d[2]}% · blocked ${on(d[3])}`
     case 0x302: return `Brake ${on(d[0])} · raw ${d[1]}`
     case 0x400: return d[6] ? `GPS ${(d[0] + canU16(d, 1) / 6000).toFixed(6)}, ${(d[3] + canU16(d, 4) / 6000).toFixed(6)} · ${d[7]} sat` : 'GPS no fix'
     case 0x401: return `Ignition ${on(d[0])} · uptime ${canU16(d, 1)} s`
@@ -819,6 +829,10 @@ function formatCanTime(ms) {
 const CanLog = memo(function CanLog({ onClose }) {
   const [snapshot, setSnapshot] = useState(null)
   const [error, setError] = useState('')
+  const [idFilter, setIdFilter] = useState('')
+  const filterText = idFilter.trim()
+  const filterId = filterText ? Number.parseInt(filterText.replace(/^0x/i, ''), 16) : null
+  const filterValid = !filterText || (/^(?:0x)?[0-9a-f]{1,8}$/i.test(filterText) && filterId <= 0x1FFFFFFF)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -856,7 +870,13 @@ const CanLog = memo(function CanLog({ onClose }) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
-  const frames = useMemo(() => [...(snapshot?.frames ?? [])].reverse(), [snapshot])
+  const frames = useMemo(() => [...(snapshot?.frames ?? [])]
+    .filter((frame) => filterValid && (filterId === null || frame.id === filterId))
+    .reverse(), [snapshot, filterId, filterValid])
+  const availableIds = [...new Set([
+    0x100, 0x101, 0x151, 0x200, 0x201, 0x300, 0x301, 0x302,
+    0x400, 0x401, 0x500, 0x501, 0x600, ...(snapshot?.frames ?? []).map((frame) => frame.id),
+  ])].sort((a, b) => a - b)
 
   return (
     <div className="can-log-overlay" role="presentation">
@@ -875,6 +895,21 @@ const CanLog = memo(function CanLog({ onClose }) {
           <span>{snapshot ? `${snapshot.total} frames received` : 'Waiting for data'}</span>
           {error && <span className="can-error">{error}</span>}
         </div>
+        <div className="can-log-filter">
+          <label htmlFor="can-id-filter">Filter by CAN ID</label>
+          <input id="can-id-filter" type="text" list="can-id-options"
+            value={idFilter} onChange={(event) => setIdFilter(event.target.value)}
+            placeholder="All IDs (e.g. 0x301)" autoComplete="off" spellCheck={false}
+            aria-invalid={!filterValid} aria-describedby="can-id-help" />
+          <datalist id="can-id-options">
+            {availableIds.map((id) => <option key={id} value={`0x${id.toString(16).toUpperCase().padStart(3, '0')}`} />)}
+          </datalist>
+          <button type="button" className="can-log-close" onClick={() => setIdFilter('')} disabled={!idFilter}>Clear filter</button>
+          <span id="can-id-help" className={filterValid ? '' : 'can-error'} aria-live="polite">
+            {filterValid ? `Hex ID, optional 0x prefix · Showing ${frames.length} of ${snapshot?.frames.length ?? 0} buffered frames`
+              : 'Enter a hex CAN ID from 0 to 1FFFFFFF.'}
+          </span>
+        </div>
         <div className="can-log-table-wrap">
           <table className="can-log-table">
             <caption>Newest CAN frames first. Time is since the ESP32 started.</caption>
@@ -890,7 +925,8 @@ const CanLog = memo(function CanLog({ onClose }) {
                 </tr>
               ))}
               {frames.length === 0 && (
-                <tr><td colSpan="5" className="can-log-empty">{snapshot ? 'No CAN frames received yet.' : 'Loading CAN frames…'}</td></tr>
+                <tr><td colSpan="5" className="can-log-empty">{!filterValid ? 'Invalid CAN ID filter.' : !snapshot ? 'Loading CAN frames…'
+                  : filterId !== null ? 'No matching CAN frames in the latest 64 received.' : 'No CAN frames received yet.'}</td></tr>
               )}
             </tbody>
           </table>
@@ -903,17 +939,15 @@ const CanLog = memo(function CanLog({ onClose }) {
 function VehiclePanel({ vehicle, error, gps, gpsDetail }) {
   const value = (v, suffix = '') => v == null ? '—' : typeof v === 'boolean' ? (v ? 'ON' : 'OFF') : `${v}${suffix}`
   const groups = [
-    ['BCM', [
-      ['Steering', value(vehicle?.steeringDeg, '°')], ['Steering link', value(vehicle?.steeringLink)],
-      ['Pedal', value(vehicle?.acceleratorPct, '%')], ['Pedal ADC', value(vehicle?.acceleratorAdc)],
-      ['Throttle blocked', value(vehicle?.throttleBlocked)], ['Horn output', value(vehicle?.horn)],
-      ['Headlight output', value(vehicle?.headlight)], ['Immobilizer state', value(vehicle?.immoState)],
+    ['Node 1 accelerator', [
+      ['Accelerator ADC', value(vehicle?.acceleratorAdc)],
+      ['ADC scale', value(vehicle?.acceleratorPct, '%')],
+      ['GPIO34 voltage estimate', value(vehicle?.acceleratorVoltageEstimate, ' V')],
     ]],
-    ['PCM', [
-      ['Motor 1', value(vehicle?.motor1)], ['Motor 2', value(vehicle?.motor2)],
-      ['Throttle out', value(vehicle?.throttleOut, '%')], ['Reverse active', value(vehicle?.reverseActive)],
-      ['Cruise active', value(vehicle?.cruiseActive)], ['ECO active', value(vehicle?.ecoActive)],
-      ['Hill active', value(vehicle?.hillActive)], ['Brake', value(vehicle?.brake)],
+    ['Node 2 motor controller', [
+      ['Motor feedback', 'Not transmitted'],
+      ['Throttle output', 'Unavailable'],
+      ['Reverse request', value(vehicle?.switches?.reverse)],
     ]],
     ['CCM switches', Object.entries(vehicle?.switches ?? {}).map(([name, on]) => [name, value(on)])],
     ['TCU', [
@@ -926,13 +960,13 @@ function VehiclePanel({ vehicle, error, gps, gpsDetail }) {
   return <section className="vehicle-panel" aria-label="Live CAN telemetry">
     <header><h2>LIVE CAN TELEMETRY</h2><span>{error ? `Host unavailable: ${error}` : vehicle?.canReady ? `${vehicle.frames} frames received` : 'CAN module unavailable'}</span></header>
     <div className="node-health">
-      {(vehicle?.nodes ?? [1, 2, 3, 4, 5].map(id => ({ id, alive: false }))).map(node =>
-        <span key={node.id} className={!node.alive ? 'offline' : node.status === 0 ? 'fault' : 'alive'}>NODE {node.id} {!node.alive ? 'OFFLINE' : node.status === 0 ? `ERROR ${node.error}` : 'ONLINE'}</span>)}
+      {(vehicle?.nodes ?? [1, 2, 3, 4, 5].map(id => ({ id, alive: null }))).map(node =>
+        <span key={node.id} className={node.alive == null ? 'unknown' : !node.alive ? 'offline' : node.status === 0 ? 'fault' : 'alive'}>NODE {node.id} {node.alive == null ? (node.source === 'receive-only' ? 'NO TELEMETRY' : 'UNKNOWN') : !node.alive ? 'OFFLINE' : node.status === 0 ? `ERROR ${node.error}` : 'ONLINE'}</span>)}
     </div>
     <div className="vehicle-groups">{groups.map(([title, rows]) =>
       <div className="vehicle-group" key={title}><h3>{title}</h3><dl>{rows.map(([label, reading]) =>
         <div key={label}><dt>{label}</dt><dd>{reading}</dd></div>)}</dl></div>)}</div>
-    <p>Speed is estimated from consecutive GPS fixes. A missing CAN signal is shown as —.</p>
+    <p>Accelerator percent uses the 0–4095 ADC scale; GPIO voltage is an estimate. Node 2 sends no motor feedback. Speed is estimated from GPS; missing signals show —.</p>
   </section>
 }
 
@@ -1324,7 +1358,7 @@ function App() {
     <div className="app">
 
       <div className="binnacle">
-            
+
         <div className="cluster">
 
           {/* ---- top rail ---- */}
@@ -1367,21 +1401,21 @@ function App() {
             </div>
 
             <ClusterGauge
-              value={Number.isFinite(vehicle?.throttleOut) ? vehicle.throttleOut : null}
+              value={Number.isFinite(vehicle?.acceleratorPct) ? vehicle.acceleratorPct : null}
               max={100}
               unit="%"
-              label="MOTOR THROTTLE"
+              label="ACCELERATOR INPUT"
               speed={0.18}
             />
 
-              
-           
-           
+
+
+
           </div>
 
         </div>
 
-      
+
 
       {/* ---- secondary deck: route + thermal ---- */}
 
@@ -1401,7 +1435,7 @@ function App() {
           }
         />}
 
-      
+
 
       </div>
       </div>

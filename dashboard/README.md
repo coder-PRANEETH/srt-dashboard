@@ -8,4 +8,4 @@ npm run dev
 npm run build:esp
 ```
 
-`build:esp` builds and compresses the site into `../node5_dash/production/data/`. Upload that folder with the Node 5 production sketch and the No OTA partition. See [the ESP32 guide](../README-ESP32.md).
+`build:esp` builds and compresses the site into `../data/`. Upload that folder with the Node 5 production sketch and the No OTA partition. See [the ESP32 guide](../README-ESP32.md).
