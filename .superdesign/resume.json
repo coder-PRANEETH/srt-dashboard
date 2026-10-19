@@ -20,7 +20,7 @@
         "dashboard/src/App.css:600:915"
       ],
       "fingerprints": {
-        ".superdesign/design-system.md": "bb87c0e891df04c4d2d5764615bc8696a861f46ff8033515e152cc1ee0651ecb",
+        ".superdesign/design-system.md": "9e17072eeb3d5c55de0eb361368c777e5d796961bbbeadae1100bafdeb9d9f66",
         "dashboard/src/index.css": "d11dc7d772e6817d1ddfc06cccdef0f8b32d614b70148c334affa16ce3787320",
         "dashboard/src/App.jsx": "eaa3bafe06f6894a4e23a9bde807f80d9dea17d12cef86b0ed09dd6e99db93c4",
         "dashboard/src/App.css": "5329ead13db5adc1853b774fcf178706ee09986548b3b9f3ccb7171fb1847f09"
@@ -29,11 +29,11 @@
       "drafts": {
         "30d505cc-6133-4cd4-9d73-92eb1f5f8206": {
           "title": "SRT orange/black cockpit",
-          "visualDirection": "Instrument-only orange/black cockpit, IMU pitch wheel, SRT intro, button-opened fullscreen offline map",
-          "currentVersion": 8
+          "visualDirection": "Instrument-only orange/black cockpit, IMU pitch wheel, SRT intro, button-opened fullscreen offline map; minimal labels, white text/rules, black and orange surfaces",
+          "currentVersion": 9
         }
       },
-      "updatedAt": "2026-10-19T16:19:58.745981+00:00",
+      "updatedAt": "2026-10-19T16:31:29.175971+00:00",
       "baselineVersion": 1
     },
     "/status": {
@@ -53,7 +53,7 @@
         "node4_tcu.ino:34:132"
       ],
       "fingerprints": {
-        ".superdesign/design-system.md": "bb87c0e891df04c4d2d5764615bc8696a861f46ff8033515e152cc1ee0651ecb",
+        ".superdesign/design-system.md": "9e17072eeb3d5c55de0eb361368c777e5d796961bbbeadae1100bafdeb9d9f66",
         "dashboard/src/index.css": "d11dc7d772e6817d1ddfc06cccdef0f8b32d614b70148c334affa16ce3787320",
         "dashboard/src/App.jsx": "eaa3bafe06f6894a4e23a9bde807f80d9dea17d12cef86b0ed09dd6e99db93c4",
         "dashboard/src/App.css": "5329ead13db5adc1853b774fcf178706ee09986548b3b9f3ccb7171fb1847f09",
@@ -64,11 +64,11 @@
       "drafts": {
         "404cd029-83f5-47f3-8bf4-c2dba1f3612a": {
           "title": "SRT status \u2014 mobile fault diagnostics",
-          "visualDirection": "Orange/black mobile message cards; tappable nodes; faults; sensor detail; filters; pause/copy/export",
-          "currentVersion": 2
+          "visualDirection": "Orange/black mobile message cards; tappable nodes; faults; sensor detail; filters; pause/copy/export; minimal labels, white text/rules, black and orange surfaces",
+          "currentVersion": 4
         }
       },
-      "updatedAt": "2026-10-19T16:19:58.745981+00:00"
+      "updatedAt": "2026-10-19T16:31:29.175971+00:00"
     }
   }
 }
