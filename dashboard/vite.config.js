@@ -2,14 +2,8 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import process from 'node:process'
 
-/*
- * ESP32 #1 hosts this build from LittleFS and exposes /api/data
- * (potentiometer) and /api/gps (relayed from ESP32 #2, which owns the
- * Ready-to-Sky module).
- *
- * Set DASH_ESP_HOST when developing against the real board:
- *   DASH_ESP_HOST=http://192.168.4.1 npm run dev
- */
+// Node 5 hosts the site and relays CAN sensor data through /api/*.
+// Use DASH_ESP_HOST=http://192.168.4.1 for development against the board.
 const ESP_HOST = process.env.DASH_ESP_HOST || 'http://192.168.4.1'
 
 /*
@@ -32,12 +26,8 @@ const stripCrossorigin = {
 export default defineConfig({
   plugins: [react(), stripCrossorigin],
 
-  /*
-   * Relative asset URLs. The board serves everything from the filesystem
-   * root, and a relative base keeps the page working if it is ever opened
-   * from a subpath or straight off disk.
-   */
-  base: './',
+  // Root assets also resolve when opening /status/ directly.
+  base: '/',
 
   build: {
     /*
