@@ -75,6 +75,24 @@ void testDrive() {
   assert(!drive.held && drive.adc==0); txWorks=true;
   assert(driveSwitchMask(127,false)==(2|8|16|32));
   assert(driveSwitchMask(127,true)==(2|4|8|16|32));
+  // A partial claim cannot keep overwriting an unclaimed normal pedal sender.
+  drive=DriveHost{}; pedal=RemoteDriveGate{}; switches=RemoteDriveGate{}; delivered=outgoing.size();
+  physicalPedal=0; physicalSwitches=0; clockMs+=1000; bus();
+  command("throttle"); physicalPedal=1200; bus(); // pedal rejects claim, switches accept
+  assert(pedal.phase==0 && switches.phase==1);
+  stopDrive(); bus(); assert(switches.phase==2);
+  size_t before=outgoing.size(); clockMs+=100; bus(); serviceDrive();
+  for(size_t n=before;n<outgoing.size();++n) assert(outgoing[n].id!=0x301);
+  physicalPedal=0;
+  for(int n=0;n<15;++n){clockMs+=100;bus();serviceDrive();}
+  assert(pedal.phase==0 && switches.phase==0 && !drive.session);
+  // A continuously renewed browser gesture still has a five-second hard limit.
+  command("throttle"); bus();
+  const uint32_t heldToken=drive.token;
+  for(int n=1;n<50;++n){clockMs+=100;bus();command("throttle",n+1);assert(drive.held);}
+  clockMs+=100;bus();serviceDrive();assert(!drive.held && drive.adc==0 && drive.token!=heldToken);
+  bus(); command("throttle"); bus();
+  command("throttle"); assert(server.code==409 && !drive.held); // repeated sequence
   // Time arithmetic and gate expiry across millis wrap.
   RemoteDriveGate wrap; old[6]=1; driveWrite32(old+2,99);
   assert(wrap.accept(old,8,1,true,false,0xFFFFFFF0));

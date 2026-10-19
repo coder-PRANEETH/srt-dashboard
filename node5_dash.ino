@@ -413,10 +413,11 @@ bool sendDriveAdc(uint16_t adc) {
   const bool sent=driveSend(0x301,data); drive.adc=sent ? adc : 0; return sent;
 }
 void stopDrive(const char *reason="") {
+  const bool owned=drive.paired || driveGateAt(0x121,1) || driveGateAt(0x121,2);
   if(drive.held) drive.stoppedAt=millis();
   drive.held=false; drive.paired=false; drive.percent=0; drive.adc=0; drive.reason=reason;
   if(++drive.token==0) ++drive.token;
-  if(drive.session) { sendDriveAdc(0); sendDriveGate(0); }
+  if(drive.session) { if(owned) sendDriveAdc(0); sendDriveGate(0); }
 }
 void serviceDrive() {
   const uint32_t now=millis();
@@ -426,8 +427,12 @@ void serviceDrive() {
   drive.lastTx=now;
   if(!drive.held) {
     // Nodes latch zero/held direction on expiry. Restore switches before pedal.
-    if(driveGateAt(0x121,0) && driveGateAt(0x122,0)) { drive.session=0; return; }
-    sendDriveAdc(0); sendDriveGate(0);
+    const bool pedalNormal=fresh(sampleFor(0x121),250) && (sampleFor(0x121)->bytes[0]&3)==0;
+    const bool switchesNormal=fresh(sampleFor(0x122),250) && (sampleFor(0x122)->bytes[0]&3)==0;
+    if(pedalNormal && switchesNormal) { drive.session=0; return; }
+    // A rejected partial claim must not inject zeros over the normal pedal sender.
+    if(!pedalNormal) sendDriveAdc(0);
+    sendDriveGate(0);
     if(drivePedalIdle() && now-drive.stoppedAt>=DRIVE_SETTLE_MS && bool(sampleFor(0x122)->bytes[1]&4)==drive.wireReverse) {
       if(driveGateAt(0x122,2)) sendDriveGate(2);
       else if(driveGateAt(0x122,0)) sendDriveGate(3);
