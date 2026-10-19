@@ -12,6 +12,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'node5_dash.ino').read_text()
 backend = source[source.index('struct Sample {'):source.index('const char *mime')]
+backend += source[source.index('void sendDiagnostics()'):source.index('void sendDashboard()')]
 shim = r'''
 #include <algorithm>
 #include <cmath>
@@ -44,6 +45,10 @@ uint32_t clockMs = 1000;
 uint32_t millis() { return clockMs; }
 bool canReady = true;
 uint8_t canTxCount = 0, canRxCount = 0;
+uint32_t canTxTotal = 3, canRxTotal = 0, canTxFailed = 2, canLastRxAt = 0;
+struct EspMock { unsigned getFreeHeap(){return 140000;} unsigned getMinFreeHeap(){return 130000;} unsigned getMaxAllocHeap(){return 110000;} } ESP;
+struct FsMock { unsigned totalBytes(){return 1900000;} unsigned usedBytes(){return 1500000;} } LittleFS;
+struct WifiMock { unsigned softAPgetStationNum(){return 1;} } WiFi;
 struct SerialMock { template<class... T> void printf(const char*, T...) {} } Serial;
 struct Server {
   String filter, body; int code = 0;
@@ -60,7 +65,7 @@ void push(uint32_t id, std::initializer_list<uint8_t> bytes) {
 bool canRead(uint32_t &id, uint8_t &len, uint8_t (&data)[8]) {
   if (incoming.empty()) return false;
   auto f = incoming.front(); incoming.pop_front();
-  id = f.id; len = f.len; memcpy(data, f.data, 8); ++canRxCount; return true;
+  id = f.id; len = f.len; memcpy(data, f.data, 8); ++canRxCount; ++canRxTotal; canLastRxAt = millis(); return true;
 }
 '''
 scenarios = r'''
@@ -68,7 +73,7 @@ void record(const char *label) { std::cout << label << '\t' << server.code << '\
 void vehicle(const char *label) { sendVehicle(); record(label); }
 void log(const char *label, const char *filter) { server.filter = filter; sendCanLog(); record(label); }
 int main() {
-  vehicle("empty");
+  vehicle("empty"); sendDiagnostics(); record("diagnostics-empty");
   push(0x301, {0xD0,0x07}); // 2000, deliberately different from big-endian decoding
   push(0x300, {0x25}); // cruise + reverse + headlight, autonomous OFF
   vehicle("live"); log("short-log", ""); log("filter", "0x301");
@@ -77,7 +82,7 @@ int main() {
   // Old payloads and out-of-range ADC must not refresh valid data.
   push(0x301, {7,208,48,0,0,0,0,0}); push(0x300, {1,0,1,0,0,1,0,0});
   push(0x301, {0,16}); push(0x301, {}); push(0x300, {});
-  vehicle("malformed");
+  vehicle("malformed"); sendDiagnostics(); record("diagnostics-malformed");
   clockMs = 4000; vehicle("at-3000ms");
   clockMs = 4001; vehicle("stale-switches");
   push(0x301, {0,0}); vehicle("zero");
@@ -97,6 +102,7 @@ int main() {
   // Unsigned millis subtraction must also work over wraparound.
   clockMs = 0xFFFFFFF0; push(0x301, {1,0}); push(0x300, {0}); vehicle("pre-wrap");
   clockMs = 100; vehicle("post-wrap");
+  fsReady = true; push(0x777, {1}); sendDiagnostics(); record("diagnostics-wrap");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
@@ -149,3 +155,16 @@ assert result('ring')['frames'][-1]['data'] == [69, 0]
 assert result('post-wrap')['nodes'][0]['alive'] is True
 assert result('post-wrap')['nodes'][2]['alive'] is True
 print('CAN receiver/API tests passed: payloads, endian, all switch bits, freshness, malformed frames, GPS, filter, ring buffer, clock wrap')
+
+d = result('diagnostics-empty')
+assert d['freeHeap'] == 140000 and d['minFreeHeap'] == 130000
+assert d['lastRxAgeMs'] is None and d['fsTotal'] == 0 and not d['fsReady']
+assert all(not x['seen'] and x['ageMs'] is None for x in d['signals'])
+d = result('diagnostics-malformed')
+assert d['malformedFrames'] == 5 and d['signals'][0]['invalid'] == 3
+assert d['signals'][0]['ageMs'] == 501 and not d['signals'][0]['fresh']
+d = result('diagnostics-wrap')
+assert d['signals'][0]['ageMs'] == 116 and d['signals'][0]['fresh']
+assert d['unknownFrames'] == 1 and d['lastRxAgeMs'] == 0
+assert d['fsReady'] and d['fsUsed'] == 1500000 and d['txFailed'] == 2
+print('Diagnostics tests passed: counters, missing sensors, memory, storage, clock wrap')

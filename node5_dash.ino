@@ -35,13 +35,13 @@ Shared CAN connection (classic ESP32 + MCP2515):
 const char *AP_SSID = "srt-dash";
 const char *AP_PASS = "12345678"; // Change before deployment.
 WebServer server(80);
-struct Sample { uint8_t bytes[8] = {}; uint8_t len = 0; uint32_t at = 0; bool seen = false; };
+struct Sample { uint8_t bytes[8] = {}; uint8_t len = 0; uint32_t at = 0, received = 0, invalid = 0; bool seen = false; };
 const uint16_t ids[] = {0x100,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x400,0x401,0x500,0x501};
 Sample samples[sizeof(ids)/sizeof(ids[0])];
 struct NodeState { uint8_t status = 0, error = 0, tx = 0, rx = 0; uint32_t at = 0; bool seen = false; } nodes[6];
 struct LogFrame { uint32_t seq, ms, id; uint8_t len, bytes[8]; } logFrames[64];
 uint8_t logNext = 0, logCount = 0;
-uint32_t frameCount = 0, lastBeat = 0;
+uint32_t frameCount = 0, lastBeat = 0, malformedFrames = 0, unknownFrames = 0;
 bool fsReady = false;
 float gpsSpeedKmh = NAN, prevLat = NAN, prevLon = NAN;
 uint32_t prevGpsAt = 0;
@@ -74,6 +74,9 @@ void readCan() {
     Sample *s = sampleFor(id);
     const uint8_t expectedLength = id == 0x300 ? 1 : id == 0x301 ? 2 : 8;
     const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095);
+    if (s) { ++s->received; if (!validPayload) { ++s->invalid; ++malformedFrames; } }
+    else if (id == 0x600) { if (len != 8 || data[0] < 1 || data[0] > 5) ++malformedFrames; }
+    else ++unknownFrames;
     if (s && validPayload) {
       memcpy(s->bytes, data, 8); s->len = len; s->at = now; s->seen = true;
       if (id == 0x400) {
@@ -206,6 +209,7 @@ void sendCanLog() {
   }
   readCan(); String j; j.reserve(9500);
   j = "{\"ready\":"; j += canReady ? "true" : "false";
+  j += ",\"uptimeMs\":" + String(millis());
   j += ",\"total\":" + String(frameCount) + ",\"frames\":[";
   bool first = true;
   for (uint8_t n=0; n<logCount; ++n) {
@@ -244,6 +248,40 @@ bool sendFile(String path) {
   }
   f.close(); readCan(); return true;
 }
+// Bounded, on-demand diagnostics. Histories stay in the browser.
+void sendDiagnostics() {
+  readCan();
+  String j; j.reserve(1800);
+  j = "{\"uptimeMs\":" + String(millis());
+  j += ",\"freeHeap\":" + String(ESP.getFreeHeap());
+  j += ",\"minFreeHeap\":" + String(ESP.getMinFreeHeap());
+  j += ",\"largestFreeBlock\":" + String(ESP.getMaxAllocHeap());
+  j += ",\"fsReady\":" + String(fsReady ? "true" : "false");
+  j += ",\"fsTotal\":" + String(fsReady ? LittleFS.totalBytes() : 0);
+  j += ",\"fsUsed\":" + String(fsReady ? LittleFS.usedBytes() : 0);
+  j += ",\"clients\":" + String(WiFi.softAPgetStationNum());
+  j += ",\"canReady\":" + String(canReady ? "true" : "false");
+  j += ",\"rxTotal\":" + String(canRxTotal) + ",\"txTotal\":" + String(canTxTotal);
+  j += ",\"txFailed\":" + String(canTxFailed);
+  j += ",\"lastRxAgeMs\":" + (canRxTotal ? String(millis() - canLastRxAt) : "null");
+  j += ",\"malformedFrames\":" + String(malformedFrames) + ",\"unknownFrames\":" + String(unknownFrames);
+  j += ",\"signals\":[";
+  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500};
+  const uint16_t timeouts[] = {501,3001,3000,3000,1000};
+  for (uint8_t n=0; n<5; ++n) {
+    const Sample *s = sampleFor(signalIds[n]);
+    if (n) j += ',';
+    j += "{\"id\":" + String(signalIds[n]) + ",\"seen\":" + String(s->seen ? "true" : "false");
+    j += ",\"fresh\":" + String(fresh(s, timeouts[n]) ? "true" : "false");
+    j += ",\"ageMs\":" + (s->seen ? String(millis()-s->at) : "null");
+    j += ",\"timeoutMs\":" + String(timeouts[n]) + ",\"dlc\":" + String(s->len);
+    j += ",\"received\":" + String(s->received) + ",\"invalid\":" + String(s->invalid) + "}";
+  }
+  j += "]}"; jsonHeader(); server.send(200, "application/json", j);
+}
+void sendDashboard() {
+  if (!sendFile("/index.html")) server.send(404,"text/plain","website missing: upload LittleFS data");
+}
 void setup() {
   Serial.begin(115200);
   fsReady = LittleFS.begin(false);
@@ -252,7 +290,8 @@ void setup() {
   WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID, AP_PASS); WiFi.setSleep(false);
   server.on("/api/data", sendSpeed); server.on("/api/gps", sendGps);
   server.on("/api/vehicle", sendVehicle); server.on("/api/can-log", sendCanLog);
-  server.on("/status", [](){ sendVehicle(); });
+  server.on("/api/diagnostics", sendDiagnostics);
+  server.on("/status", sendDashboard); server.on("/status/", sendDashboard);
   server.onNotFound([](){
     if (server.uri().startsWith("/api/")) { server.send(404,"application/json","{\"error\":\"unknown API\"}"); return; }
     if (sendFile(server.uri())) return;
