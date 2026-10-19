@@ -33,3 +33,10 @@ ESP32 classic, No OTA 2MB app / 1.875MiB filesystem partition (0x1E0000 usable p
 
 ## Copy constraint — latest user revision
 No explanatory text, taglines, decorative section numbers, instructional paragraphs, repeated labels, or implementation descriptions in either page. Keep only useful readings, units, states, fault codes, short controls, and necessary attribution. Use MAP/CLOSE, INSPECT, FRAMES, COPY, EXPORT, RESET; compact filter labels. Omit the introductory slogan, pitch disclaimer, ADC explanation, node troubleshooting prose, log instructions and verbose empty-state text. The measured wheel value remains labeled IMU PITCH so it cannot imply steering angle. Keep a single small PREVIEW marker in design prototypes with sample values; it does not ship in the live app. Accessibility labels can remain descriptive without adding visible copy.
+
+
+### Implemented steering control (2026-10-20)
+
+Keep the approved cockpit palette and minimal labels. The bottom action group now has STEER and MAP. STEER opens a separate fullscreen control panel: LEFT/RIGHT hold targets, a prominent STOP, NODE 1 / PWM 60, applied PWM output, and short hold/release guidance. Mobile uses two direction buttons above a full-width STOP. Do not make it a toggle or add a speed slider. Retain pointer cancellation, focus/visibility stops, the 350 ms firmware watchdog and the five-second hold limit. Physical steering angle remains unavailable; the homepage wheel still shows IMU pitch. Diagnostics remain exclusively at /status with no homepage link.
+
+Throttle voltage is the existing raw ADC estimate minus 0.7 V, clamped to zero; percentage uses a 2.6 V corrected full scale. Raw ADC/voltage remain available in diagnostics. Node 1 steering feedback has its own availability and fault state.

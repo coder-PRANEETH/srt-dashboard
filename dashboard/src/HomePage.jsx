@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import MapView from './MapView'
+import SteeringPanel from './SteeringPanel'
 import { advanceTrack, useNow, useTelemetry, validFix } from './useTelemetry'
 import { display, freshFeed, number } from './diagnostics'
 
@@ -23,6 +24,8 @@ function Wheel({ angle, available }) {
 export default function HomePage() {
   const { feeds } = useTelemetry(), now = useNow()
   const [intro, setIntro] = useState(introNeeded), [mapOpen, setMapOpen] = useState(false)
+  const [steeringOpen, setSteeringOpen] = useState(false)
+  const closeSteering = useCallback(() => setSteeringOpen(false), [])
   const closeMap = useCallback(() => setMapOpen(false), [])
   const [memory, setMemory] = useState({ gps: null, vehicle: null, angle: 0, track: { points: [], trip: 0, heading: null, at: 0 } })
   if (memory.gps !== feeds.gps || memory.vehicle !== feeds.vehicle) {
@@ -44,7 +47,7 @@ export default function HomePage() {
   const leading = number(speed) ? digits.match(/^0{1,2}(?=\d)/)?.[0] || '' : ''
   const { track } = memory
   return <>
-    <div className="cockpit" inert={mapOpen || intro}>
+    <div className="cockpit" inert={mapOpen || steeringOpen || intro}>
       <header className="topbar"><span className="wordmark">SRT</span><div className="top-actions"><span className={`pill ${fix ? '' : 'attention'}`}><i className="dot" />{fix ? 'GPS FIX' : 'NO FIX'}</span><time className="mono">{new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}</time></div></header>
       <main className="drive"><div className="instruments">
         <section aria-label="GPS speed"><div className="section-label caps">GPS speed</div><div className="speed-value"><span className="ghost">{leading}</span>{digits.slice(leading.length)}</div><div className="speed-unit">KM / H</div><div className="speed-rule" style={{ '--speed': `${(speed || 0) / 1.6}%` }} /><div className="speed-ticks mono">{[0, 40, 80, 120, 160].map(n => <span key={n}>{n}</span>)}</div></section>
@@ -54,10 +57,11 @@ export default function HomePage() {
         <div><div className="caps muted">TRIP</div><div className="rail-value mono">{track.trip.toFixed(2)}<small>km</small></div></div>
         <div><div className="caps muted">Heading</div><div className="rail-value mono">{fix ? display(track.heading) : '—'}<small>°</small></div></div>
         <div><div className="caps muted">SATELLITES</div><div className="rail-value mono">{fix ? display(gps.sats) : '—'}</div></div>
-        <button className="button primary" onClick={() => setMapOpen(true)}><svg className="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2V5ZM9 3v16M15 5v16" /></svg>MAP ↗</button>
+        <div className="drive-actions"><button className="button" onClick={() => setSteeringOpen(true)}>STEER ↔</button><button className="button primary" onClick={() => setMapOpen(true)}><svg className="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2V5ZM9 3v16M15 5v16" /></svg>MAP ↗</button></div>
       </div></main>
     </div>
     {intro && <button className="launch" aria-label="Skip SRT opening animation" onClick={() => setIntro(false)} autoFocus><span className="wordmark">SRT</span><span className="launch-line" /></button>}
+    {steeringOpen && <SteeringPanel onClose={closeSteering} />}
     {mapOpen && <MapView points={track.points} fix={fix} onClose={closeMap} />}
   </>
 }

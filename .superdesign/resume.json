@@ -15,17 +15,25 @@
         "dashboard/src/useTelemetry.js",
         "dashboard/src/diagnostics.js",
         "dashboard/src/HomePage.jsx",
-        "dashboard/src/MapView.jsx"
+        "dashboard/src/MapView.jsx",
+        "dashboard/src/SteeringPanel.jsx",
+        "dashboard/src/steeringClient.js",
+        "SteeringControl.h",
+        "ThrottleCalibration.h"
       ],
       "fingerprints": {
-        ".superdesign/design-system.md": "9e17072eeb3d5c55de0eb361368c777e5d796961bbbeadae1100bafdeb9d9f66",
+        ".superdesign/design-system.md": "a5dce172602deb665d2821fb842e8cf05fab6017dc008fca9b1df45da2a096e2",
         "dashboard/src/index.css": "7815137706b78bdddebd2daf2086d20b7b8272f1e3136341e0f9da7251098161",
         "dashboard/src/App.jsx": "de7fddc5ade53159a7615aa41e45ff8513207b0fa3f07b68f96865bb6df7c8de",
-        "dashboard/src/App.css": "b46ff5b3bbce6460ba35f858c7cd64db5fe516b1c131d0e4894fd6831ddcae33",
+        "dashboard/src/App.css": "7364b27cecac5d03f4945152d4ebed79eb60be2cb3f21cff131f12ce28da7adf",
         "dashboard/src/useTelemetry.js": "38c4b3fc20536f2a1a3c9d320364a2f6f7b923a7b739fd7b38a5ac1199020825",
-        "dashboard/src/diagnostics.js": "95de9b50a77ef1ff70f0c1119edea0fb287e9468b7c25d6236bce3b7a7a24890",
-        "dashboard/src/HomePage.jsx": "d92d0b93db6aadf9b0d9debc1b191cb8139e05f69e01f307e86201ecbb63ccca",
-        "dashboard/src/MapView.jsx": "d75a02c4ada471713dacf0d6c3413ed60994643c4c3c4bf9894d1234b5ea0c47"
+        "dashboard/src/diagnostics.js": "8d198e9483d5e4bc0ea7a6ec408d8b6de9cd19055c7855cf8b59e14aa2ba9c72",
+        "dashboard/src/HomePage.jsx": "45f9a02b853124a6b9aaa914817df47c8d37bbd718135a7537b9446b96b31a42",
+        "dashboard/src/MapView.jsx": "d75a02c4ada471713dacf0d6c3413ed60994643c4c3c4bf9894d1234b5ea0c47",
+        "dashboard/src/SteeringPanel.jsx": "83282b0f5048abef1bb8a06a5a8c9778535ccb1a8a5dfe775ae81df2cf8a1e21",
+        "dashboard/src/steeringClient.js": "76c8179b0ddcf87d06aa6092b16103b8735ba28e4753658553e075c7d2e387f5",
+        "SteeringControl.h": "c7947b0c8722c87b296b040ed54b8bff8746d90e06fd9fde9c1b93e84367f8a2",
+        "ThrottleCalibration.h": "8ed4fdb0324d07855322c1781f793f779e4a3226e57b97e00bfc3fef7f6616f5"
       },
       "components": [],
       "drafts": {
@@ -35,7 +43,7 @@
           "currentVersion": 9
         }
       },
-      "updatedAt": "2026-10-19T17:02:21.945967+00:00",
+      "updatedAt": "2026-10-20T00:00:00+05:30",
       "baselineVersion": 1
     },
     "/status": {
@@ -54,18 +62,22 @@
         "dashboard/src/diagnostics.js",
         "dashboard/src/StatusPage.jsx",
         "node5_dash.ino",
-        "node4_tcu.ino"
+        "node4_tcu.ino",
+        "SteeringControl.h",
+        "ThrottleCalibration.h"
       ],
       "fingerprints": {
-        ".superdesign/design-system.md": "9e17072eeb3d5c55de0eb361368c777e5d796961bbbeadae1100bafdeb9d9f66",
+        ".superdesign/design-system.md": "a5dce172602deb665d2821fb842e8cf05fab6017dc008fca9b1df45da2a096e2",
         "dashboard/src/index.css": "7815137706b78bdddebd2daf2086d20b7b8272f1e3136341e0f9da7251098161",
         "dashboard/src/App.jsx": "de7fddc5ade53159a7615aa41e45ff8513207b0fa3f07b68f96865bb6df7c8de",
-        "dashboard/src/App.css": "b46ff5b3bbce6460ba35f858c7cd64db5fe516b1c131d0e4894fd6831ddcae33",
+        "dashboard/src/App.css": "7364b27cecac5d03f4945152d4ebed79eb60be2cb3f21cff131f12ce28da7adf",
         "dashboard/src/useTelemetry.js": "38c4b3fc20536f2a1a3c9d320364a2f6f7b923a7b739fd7b38a5ac1199020825",
-        "dashboard/src/diagnostics.js": "95de9b50a77ef1ff70f0c1119edea0fb287e9468b7c25d6236bce3b7a7a24890",
-        "dashboard/src/StatusPage.jsx": "3f8dda5c8246eed0e1d2f99f2d07132f65246d9794c6d6e58ea6f97f08479423",
-        "node5_dash.ino": "226f1679e69c7e60cd5ce3c310a6663f6abc3bff131a611ebbac6a872093a7ea",
-        "node4_tcu.ino": "f499612fd6e78ea0145f970aa6937650e186a0af407dabdf2edf0dcf8b32533f"
+        "dashboard/src/diagnostics.js": "8d198e9483d5e4bc0ea7a6ec408d8b6de9cd19055c7855cf8b59e14aa2ba9c72",
+        "dashboard/src/StatusPage.jsx": "6f2718002980b0de35ed24cacf82b50a14943d5cfb26261cba599ed8e03f6c8d",
+        "node5_dash.ino": "d912f5d0a35fb91db82b079318edb8f110d9f6597a8ea44becde9e1d869cc2ca",
+        "node4_tcu.ino": "f499612fd6e78ea0145f970aa6937650e186a0af407dabdf2edf0dcf8b32533f",
+        "SteeringControl.h": "c7947b0c8722c87b296b040ed54b8bff8746d90e06fd9fde9c1b93e84367f8a2",
+        "ThrottleCalibration.h": "8ed4fdb0324d07855322c1781f793f779e4a3226e57b97e00bfc3fef7f6616f5"
       },
       "components": [],
       "drafts": {
@@ -75,7 +87,7 @@
           "currentVersion": 4
         }
       },
-      "updatedAt": "2026-10-19T17:02:21.946205+00:00"
+      "updatedAt": "2026-10-20T00:00:00+05:30"
     }
   }
 }

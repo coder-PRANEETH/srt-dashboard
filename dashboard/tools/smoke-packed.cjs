@@ -7,6 +7,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const root = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'data'))
 const vehicle = {
   canReady: true, frames: 42, acceleratorAdc: 2000, acceleratorPct: 35, acceleratorVoltageEstimate: 0.912, acceleratorRawVoltageEstimate: 1.612,
+  steering: { available: true, direction: 0, pwm: 0, reason: 0, ageMs: 10 },
   ignition: true, ignitionUptime: 120, hillRequest: true, pitchDeg: 5, pitchValid: true, holdPct: 0,
   switches: { cruise: true, eco: false, reverse: true, hill: false, horn: false, headlight: true, autonomous: false },
   nodes: [1,2,3,4,5].map(id => ({ id, alive: id === 2 ? null : true, status: id === 2 ? null : 1, error: 0, ageMs: 10 })),
@@ -19,10 +20,32 @@ let frames = [
   { seq: 3, ms: 1000, id: 0x500, dlc: 8, data: [1,90,0,0,0,0,0,0] },
 ]
 const calls = {}, fail = new Set()
+const steering = {ready:true, token:99, direction:0, pwm:0, reason:0, ageMs:10}
+const steeringCommands=[]
+let lastMotion=0
+function steeringExpire() {
+  if(steering.direction && Date.now()-lastMotion>=350){steering.direction=0;steering.pwm=0;++steering.token}
+}
 const mime = { '.html':'text/html', '.js':'application/javascript', '.css':'text/css', '.png':'image/png', '.svg':'image/svg+xml' }
 const server = http.createServer((req,res) => {
   const pathname = new URL(req.url,'http://localhost').pathname
   calls[pathname] = (calls[pathname] || 0)+1
+  if(pathname==='/api/steering') {
+    steeringExpire()
+    if(req.method==='POST') {
+      let body=''; req.on('data',chunk=>body+=chunk); req.on('end',()=>{
+        const params=new URLSearchParams(body), direction=params.get('direction')
+        steeringCommands.push({direction, token:params.get('token'), seq:params.get('seq'), at:Date.now(), header:req.headers['x-srt-control']})
+        let status=200
+        if(fail.has(pathname))status=503
+        else if(direction==='stop'){steering.direction=0;steering.pwm=0;++steering.token}
+        else if(Number(params.get('token'))!==steering.token)status=409
+        else {steering.direction=direction==='left'?1:2;steering.pwm=60;lastMotion=Date.now()}
+        res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(steering))
+      });return
+    }
+    res.writeHead(fail.has(pathname)?503:200,{'Content-Type':'application/json'});res.end(JSON.stringify(steering));return
+  }
   const api = { '/api/vehicle':vehicle, '/api/gps':gps, '/api/diagnostics':diagnostics, '/api/can-log':{ ready:true, total:42, uptimeMs:5000, frames } }
   if (Object.hasOwn(api,pathname)) {
     res.writeHead(fail.has(pathname) ? 503 : 200, { 'Content-Type':'application/json', 'Cache-Control':'no-store' }); res.end(JSON.stringify(api[pathname])); return
@@ -36,7 +59,7 @@ const server = http.createServer((req,res) => {
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve))
   const browser = await chromium.launch({headless:true, executablePath:process.env.BROWSER_PATH, args:['--no-sandbox']})
   try {
-    const context = await browser.newContext({viewport:{width:1280,height:800}, permissions:['clipboard-read','clipboard-write']})
+    const context = await browser.newContext({viewport:{width:1280,height:800}, hasTouch:true, permissions:['clipboard-read','clipboard-write']})
     const page = await context.newPage(), errors=[]
     page.on('pageerror',e=>errors.push(e.message))
     const base = `http://127.0.0.1:${server.address().port}`
@@ -62,6 +85,48 @@ const server = http.createServer((req,res) => {
     await page.waitForFunction(()=>[...document.querySelectorAll('.leaflet-tile')].every(t=>t.complete && Number(getComputedStyle(t).opacity)>.99));await page.screenshot({animations:'disabled',path:'/tmp/srt-implemented-map.png'})
     await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0)
     assert.match(await page.evaluate(()=>document.activeElement.textContent),/MAP/)
+    assert.equal(calls['/api/steering'] || 0,0)
+    await page.getByRole('button',{name:'STEER'}).click()
+    const left=page.getByRole('button',{name:'Hold left to steer'}),right=page.getByRole('button',{name:'Hold right to steer'})
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    await page.setViewportSize({width:390,height:844})
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))
+    await page.screenshot({animations:'disabled',path:'/tmp/srt-steering-mobile.png'})
+    const press=async button=>{const b=await button.boundingBox();await page.mouse.move(b.x+b.width/2,b.y+b.height/2);await page.mouse.down()}
+    const waitCommand=async direction=>{await page.waitForResponse(r=>r.url().endsWith('/api/steering')&&r.request().method()==='POST'&&new URLSearchParams(r.request().postData()).get('direction')===direction)}
+    let event=waitCommand('left');await press(left);await event
+    assert.equal(steering.direction,1);assert.equal(steering.pwm,60)
+    await waitCommand('left') // Holding renews, not a latched click.
+    event=waitCommand('stop');await page.mouse.up();await event;assert.equal(steering.direction,0)
+    assert.equal(steeringCommands.filter(c=>c.direction==='left').every(c=>c.header==='1'),true)
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    event=waitCommand('right');await press(right);await event;assert.equal(steering.direction,2)
+    event=waitCommand('stop');await page.mouse.move(1,1);await event;await page.mouse.up();assert.equal(steering.direction,0)
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    await left.focus();event=waitCommand('left');await page.keyboard.down('Space');await event
+    event=waitCommand('stop');await page.keyboard.up('Space');await event
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    event=waitCommand('left');await press(left);await event
+    event=waitCommand('stop');await page.evaluate(()=>window.dispatchEvent(new Event('blur')));await event;await page.mouse.up();assert.equal(steering.direction,0)
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    event=waitCommand('right');await press(right);await event
+    fail.add('/api/steering');await waitCommand('stop');await page.mouse.up()
+    const countAtFailure=steeringCommands.length
+    fail.delete('/api/steering');await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    assert.equal(steeringCommands.slice(countAtFailure).filter(c=>c.direction!=='stop').length,0,'No automatic resume after reconnect')
+    const touch=await context.newCDPSession(page)
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    let box=await left.boundingBox()
+    const point={x:box.x+box.width/2,y:box.y+box.height/2,id:1}
+    event=waitCommand('left');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point]});await event
+    event=waitCommand('stop');await touch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});await event
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    event=waitCommand('left');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point]});await event
+    box=await right.boundingBox()
+    event=waitCommand('stop');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point,{x:box.x+box.width/2,y:box.y+box.height/2,id:2}]});await event
+    await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});assert.equal(steering.direction,0)
+    await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0)
+    await page.setViewportSize({width:1280,height:800})
     vehicle.pitchDeg=null;vehicle.pitchValid=false;vehicle.acceleratorPct=null
     await page.getByText('UNAVAILABLE',{exact:true}).waitFor()
     assert.equal(await page.locator('.wheel-rotor').evaluate(el=>el.style.getPropertyValue('--pitch')),'5deg')
@@ -72,6 +137,7 @@ const server = http.createServer((req,res) => {
     vehicle.acceleratorPct=35;vehicle.pitchDeg=5;vehicle.pitchValid=true
     await page.goto(base+'/status/')
     await page.getByText('CONNECTED',{exact:true}).waitFor()
+    await page.locator('.node').nth(0).click();assert.match(await page.locator('.node-detail').innerText(),/Corrected voltage[\s\S]*0.912 V/);assert.match(await page.locator('.node-detail').innerText(),/Steering PWM output/);
     await page.locator('.node').nth(1).click();assert.match(await page.locator('.node-detail').innerText(),/NO FEEDBACK/)
     await page.locator('.node').nth(3).click();assert.match(await page.locator('.node-detail').innerText(),/MPU6050 pitch/)
     await page.locator('.node').nth(4).click();assert.match(await page.locator('.node-detail').innerText(),/136.7 KB/)
@@ -112,6 +178,7 @@ const server = http.createServer((req,res) => {
     await page.goto(base+'/status');await page.getByText('CONNECTED',{exact:true}).waitFor()
     const reduced=await browser.newPage({reducedMotion:'reduce'});await reduced.goto(base);assert.equal(await reduced.locator('.launch').count(),0)
     assert.deepEqual(errors,[])
+    console.log('Packed steering passed: pointer/keyboard release, drag-away, blur, reconnect, touch cancel and conflicting multi-touch')
     console.log('Packed UI passed: routes, layouts, lazy map, IMU freeze, unknown feedback, filters, pause, copy/export, API failures, recovery, reduced motion')
   } finally {await browser.close();server.close()}
 })().catch(e=>{console.error(e);server.close();process.exitCode=1})

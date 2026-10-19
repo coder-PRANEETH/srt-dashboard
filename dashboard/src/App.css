@@ -62,3 +62,16 @@ button:disabled{opacity:.4;cursor:default}
 .leaflet-container{font:inherit}.leaflet-container:focus-visible{outline:2px solid #fff;outline-offset:-3px}
 @media(max-width:650px){.drive{padding-bottom:28px}.sensor-grid{grid-template-columns:1fr}.top-actions .pill{font-size:9px}.speed-value{font-size:23vw}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+.drive-actions{display:flex;gap:10px}.drive-actions .button{flex:1}
+.steering-overlay{position:fixed;inset:0;z-index:60;overflow:auto;background:var(--bg)}
+.steering-console{max-width:780px;margin:0 auto;padding:clamp(24px,6vh,60px) 24px;text-align:center}
+.steering-console h1{font-size:clamp(32px,5vw,48px);margin:12px 0 24px}
+.steering-output{display:grid;gap:12px;margin:0 0 32px}.steering-output strong{font-size:clamp(38px,7vw,64px);font-weight:400;letter-spacing:-.04em}
+.steering-controls{display:grid;grid-template-columns:1fr .75fr 1fr;gap:16px;align-items:stretch}
+.steering-turn{min-height:150px;background:var(--raised);color:white;border:1px solid var(--line);border-radius:8px;font-weight:700;letter-spacing:.12em;touch-action:none;user-select:none;-webkit-touch-callout:none;transition:background .1s ease}
+.steering-turn span{display:block;font-size:52px;font-weight:300;margin-bottom:12px}.steering-turn.pressed{background:#994000;border-color:white}
+.steering-stop{font-size:18px;border:2px solid white;background:#080604}.steering-console>p{margin:24px 0 0;line-height:1.6}
+.steering-notice{min-height:24px;font-size:12px;letter-spacing:.08em}
+@media(max-width:650px){.drive-actions{grid-column:1/-1}.drive-actions .button{grid-column:auto}.steering-console{padding:32px 16px}.steering-controls{gap:10px;grid-template-columns:1fr 1fr}.steering-stop{grid-row:2;grid-column:1/-1;min-height:64px}.steering-turn{min-height:160px}.steering-console>p{font-size:10px}}
+@media(max-height:550px) and (min-width:651px){.steering-console{padding:16px 24px}.steering-console h1{font-size:28px;margin:8px}.steering-output{margin-bottom:12px;gap:4px}.steering-output strong{font-size:32px}.steering-turn{min-height:90px}.steering-turn span{font-size:28px;margin-bottom:4px}.steering-console>p{margin-top:12px}}

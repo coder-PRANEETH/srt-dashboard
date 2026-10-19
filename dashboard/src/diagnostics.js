@@ -3,7 +3,7 @@ export const display = (value, digits = 0, suffix = '') => number(value) ? `${va
 export const hex = value => `0x${value.toString(16).toUpperCase().padStart(3, '0')}`
 export const onOff = value => value === true ? 'ON' : value === false ? 'OFF' : '—'
 export const ageText = ms => number(ms) ? ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s` : 'No data'
-export const NODE_NAMES = ['Accelerator', 'Motor control', 'Switch inputs', 'GPS / IMU', 'Dashboard']
+export const NODE_NAMES = ['Pedal / steering', 'Motor control', 'Switch inputs', 'GPS / IMU', 'Dashboard']
 export const throttleVoltage = adc => Math.max(0, adc * 3.3 / 4095 - 0.7)
 export const throttlePercent = adc => Math.min(100, Math.floor(throttleVoltage(adc) * 100 / 2.6 + 1e-9))
 export const SWITCHES = ['cruise', 'eco', 'reverse', 'hill', 'horn', 'headlight', 'autonomous']
@@ -15,15 +15,19 @@ export function parseId(text) {
 }
 export function decodeFrame(frame) {
   const b = frame.data || [], id = frame.id
-  let node = ({ 0x301: 1, 0x300: 3, 0x400: 4, 0x401: 4, 0x500: 4 })[id] || null
+  let node = ({ 0x110: 5, 0x111: 1, 0x301: 1, 0x300: 3, 0x400: 4, 0x401: 4, 0x500: 4 })[id] || null
   const bytes = b.map(x => x.toString(16).toUpperCase().padStart(2, '0')).join(' ')
   let kind = 'Unknown frame', text = 'Undecoded', issue = false
-  const expected = id === 0x300 ? 1 : id === 0x301 ? 2 : [0x400, 0x401, 0x500, 0x600].includes(id) ? 8 : null
+  const expected = id === 0x300 ? 1 : id === 0x301 ? 2 : [0x110, 0x111, 0x400, 0x401, 0x500, 0x600].includes(id) ? 8 : null
   const malformed = b.length !== frame.dlc || b.length > 8 || b.some(x => !Number.isInteger(x) || x < 0 || x > 255) || (expected !== null && frame.dlc !== expected)
   if (malformed) return { ...frame, node, bytes, kind: 'Malformed frame', text: `DLC ${frame.dlc} · expected ${expected ?? '0–8'}`, issue: true }
   const be16 = n => b[n] * 256 + b[n + 1]
   const bit = n => b[0] & (1 << n) ? 'ON' : 'OFF'
-  if (id === 0x301) {
+  if (id === 0x110 || id === 0x111) {
+    kind = id === 0x110 ? 'Steering command' : 'Steering output'
+    issue = b[0] > 2 || b[1] !== (b[0] ? 60 : 0) || (id === 0x111 && (b[3] !== 1 || b[2] !== 0))
+    text = `${['STOP', 'LEFT', 'RIGHT'][b[0]] || 'INVALID'} · PWM ${b[1]}${id === 0x111 ? ` · ${['ready', 'CAN failure', 'command timeout', 'invalid command', 'hold limit'][b[2]] || 'unknown fault'}` : ''}`
+  } else if (id === 0x301) {
     kind = 'Accelerator input'
     const adc = b[0] + b[1] * 256
     issue = adc > 4095
@@ -72,6 +76,8 @@ export function diagnosticsModel(feeds, now) {
     return { id, name, state: status, age: id === 2 ? 'No feedback' : id === 5 && v ? 'Now' : ageText(number(n?.ageMs) ? n.ageMs : null), error: n?.error, sensors: [] }
   })
   nodes[0].sensors = [sensor('Pedal ADC', valid(0x301, v?.acceleratorAdc) ? `${v.acceleratorAdc} / 4095` : '—', state(0x301, v?.acceleratorAdc), `GPIO34 · ${detail(0x301)}`), sensor('Throttle', valid(0x301, v?.acceleratorPct) ? display(v.acceleratorPct, 0, '%') : '—', state(0x301, v?.acceleratorPct)), sensor('Corrected voltage', valid(0x301, v?.acceleratorVoltageEstimate) ? display(v.acceleratorVoltageEstimate, 3, ' V') : '—', valid(0x301, v?.acceleratorVoltageEstimate) ? 'ESTIMATE' : 'UNAVAILABLE', 'Raw − 0.7 V'), sensor('Raw pin voltage', valid(0x301, v?.acceleratorRawVoltageEstimate) ? display(v.acceleratorRawVoltageEstimate, 3, ' V') : '—', 'ESTIMATE')]
+  const steering = v?.steering
+  nodes[0].sensors.push(sensor('Steering PWM output', steering?.available ? `${['STOP', 'LEFT', 'RIGHT'][steering.direction] || '—'} · PWM ${steering.pwm}` : '—', steering?.available ? steering.reason ? 'FAULT' : 'LIVE' : 'UNAVAILABLE', `LPWM32 / RPWM33 · ${detail(0x111)}${steering?.reason ? ` · ${['ready', 'CAN failure', 'command timeout', 'invalid command', 'hold limit'][steering.reason] || 'fault'}` : ''}`))
   nodes[1].sensors = [sensor('Motor PWM outputs', 'Unknown', 'NO FEEDBACK', 'GPIO13 / GPIO14'), sensor('Reverse relays', 'Unknown', 'NO FEEDBACK', 'GPIO33 / GPIO26')]
   const pins = [4, 5, 13, 14, 26, 33, 32]
   nodes[2].sensors = SWITCHES.map((key, i) => sensor(key[0].toUpperCase() + key.slice(1), valid(0x300, v?.switches?.[key]) ? onOff(v.switches[key]) : '—', state(0x300, v?.switches?.[key]), `GPIO${pins[i]} · ${detail(0x300)}`))
@@ -86,6 +92,7 @@ export function diagnosticsModel(feeds, now) {
   }
   if (v && (!v.pitchValid || !valid(0x500, v.pitchDeg))) faults.push({ key: 'imu', label: 'Node 4 IMU unavailable', node: 4 })
   if (g && !gpsLive) faults.push({ key: 'gps', label: 'Node 4 GPS no fix', node: 4 })
+  if (v && (!v.steering?.available || v.steering.reason)) faults.push({ key: 'steering', label: v.steering?.available ? 'Node 1 steering stopped · check output' : 'Node 1 steering unavailable', node: 1 })
   if (v && !v.canReady) faults.push({ key: 'can', label: 'CAN unavailable', node: 5 })
   if (d && !d.fsReady) faults.push({ key: 'fs', label: 'LittleFS unavailable', node: 5 })
   return { nodes, faults, connected: !!v, canReady: v?.canReady, diagnostics: d }
