@@ -59,7 +59,7 @@ const server = http.createServer((req,res) => {
     await page.getByRole('dialog').waitFor()
     await page.waitForFunction(()=>document.querySelectorAll('.leaflet-tile').length>0)
     assert.ok(Object.keys(calls).some(p=>p.startsWith('/tiles/')))
-    await page.waitForFunction(()=>[...document.querySelectorAll('.leaflet-tile')].every(t=>t.complete));await page.screenshot({animations:'disabled',path:'/tmp/srt-implemented-map.png'})
+    await page.waitForFunction(()=>[...document.querySelectorAll('.leaflet-tile')].every(t=>t.complete && Number(getComputedStyle(t).opacity)>.99));await page.screenshot({animations:'disabled',path:'/tmp/srt-implemented-map.png'})
     await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0)
     assert.match(await page.evaluate(()=>document.activeElement.textContent),/MAP/)
     vehicle.pitchDeg=null;vehicle.pitchValid=false;vehicle.acceleratorPct=null

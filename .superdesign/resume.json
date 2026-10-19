@@ -10,20 +10,22 @@
       "contextFiles": [
         ".superdesign/design-system.md",
         "dashboard/src/index.css",
-        "dashboard/src/App.jsx:234:479",
-        "dashboard/src/App.jsx:697:777",
-        "dashboard/src/App.jsx:881:970",
-        "dashboard/src/App.jsx:1357:1450",
-        "dashboard/src/App.css:1:190",
-        "dashboard/src/App.css:220:320",
-        "dashboard/src/App.css:408:548",
-        "dashboard/src/App.css:600:915"
+        "dashboard/src/App.jsx",
+        "dashboard/src/App.css",
+        "dashboard/src/useTelemetry.js",
+        "dashboard/src/diagnostics.js",
+        "dashboard/src/HomePage.jsx",
+        "dashboard/src/MapView.jsx"
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "9e17072eeb3d5c55de0eb361368c777e5d796961bbbeadae1100bafdeb9d9f66",
-        "dashboard/src/index.css": "d11dc7d772e6817d1ddfc06cccdef0f8b32d614b70148c334affa16ce3787320",
-        "dashboard/src/App.jsx": "eaa3bafe06f6894a4e23a9bde807f80d9dea17d12cef86b0ed09dd6e99db93c4",
-        "dashboard/src/App.css": "5329ead13db5adc1853b774fcf178706ee09986548b3b9f3ccb7171fb1847f09"
+        "dashboard/src/index.css": "7815137706b78bdddebd2daf2086d20b7b8272f1e3136341e0f9da7251098161",
+        "dashboard/src/App.jsx": "de7fddc5ade53159a7615aa41e45ff8513207b0fa3f07b68f96865bb6df7c8de",
+        "dashboard/src/App.css": "b46ff5b3bbce6460ba35f858c7cd64db5fe516b1c131d0e4894fd6831ddcae33",
+        "dashboard/src/useTelemetry.js": "38c4b3fc20536f2a1a3c9d320364a2f6f7b923a7b739fd7b38a5ac1199020825",
+        "dashboard/src/diagnostics.js": "95de9b50a77ef1ff70f0c1119edea0fb287e9468b7c25d6236bce3b7a7a24890",
+        "dashboard/src/HomePage.jsx": "d92d0b93db6aadf9b0d9debc1b191cb8139e05f69e01f307e86201ecbb63ccca",
+        "dashboard/src/MapView.jsx": "d75a02c4ada471713dacf0d6c3413ed60994643c4c3c4bf9894d1234b5ea0c47"
       },
       "components": [],
       "drafts": {
@@ -33,7 +35,7 @@
           "currentVersion": 9
         }
       },
-      "updatedAt": "2026-10-19T16:31:29.175971+00:00",
+      "updatedAt": "2026-10-19T17:02:21.945967+00:00",
       "baselineVersion": 1
     },
     "/status": {
@@ -46,18 +48,23 @@
       "contextFiles": [
         ".superdesign/design-system.md",
         "dashboard/src/index.css",
-        "dashboard/src/App.jsx:783:972",
-        "dashboard/src/App.css:123:190",
-        "dashboard/src/App.css:894:915",
-        "node5_dash.ino:40:220",
-        "node4_tcu.ino:34:132"
+        "dashboard/src/App.jsx",
+        "dashboard/src/App.css",
+        "dashboard/src/useTelemetry.js",
+        "dashboard/src/diagnostics.js",
+        "dashboard/src/StatusPage.jsx",
+        "node5_dash.ino",
+        "node4_tcu.ino"
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "9e17072eeb3d5c55de0eb361368c777e5d796961bbbeadae1100bafdeb9d9f66",
-        "dashboard/src/index.css": "d11dc7d772e6817d1ddfc06cccdef0f8b32d614b70148c334affa16ce3787320",
-        "dashboard/src/App.jsx": "eaa3bafe06f6894a4e23a9bde807f80d9dea17d12cef86b0ed09dd6e99db93c4",
-        "dashboard/src/App.css": "5329ead13db5adc1853b774fcf178706ee09986548b3b9f3ccb7171fb1847f09",
-        "node5_dash.ino": "342c0404449c9288d2e96b0cea81dd0f104d4c4575445bbec4fbc4e7333a0794",
+        "dashboard/src/index.css": "7815137706b78bdddebd2daf2086d20b7b8272f1e3136341e0f9da7251098161",
+        "dashboard/src/App.jsx": "de7fddc5ade53159a7615aa41e45ff8513207b0fa3f07b68f96865bb6df7c8de",
+        "dashboard/src/App.css": "b46ff5b3bbce6460ba35f858c7cd64db5fe516b1c131d0e4894fd6831ddcae33",
+        "dashboard/src/useTelemetry.js": "38c4b3fc20536f2a1a3c9d320364a2f6f7b923a7b739fd7b38a5ac1199020825",
+        "dashboard/src/diagnostics.js": "95de9b50a77ef1ff70f0c1119edea0fb287e9468b7c25d6236bce3b7a7a24890",
+        "dashboard/src/StatusPage.jsx": "3f8dda5c8246eed0e1d2f99f2d07132f65246d9794c6d6e58ea6f97f08479423",
+        "node5_dash.ino": "226f1679e69c7e60cd5ce3c310a6663f6abc3bff131a611ebbac6a872093a7ea",
         "node4_tcu.ino": "f499612fd6e78ea0145f970aa6937650e186a0af407dabdf2edf0dcf8b32533f"
       },
       "components": [],
@@ -68,7 +75,7 @@
           "currentVersion": 4
         }
       },
-      "updatedAt": "2026-10-19T16:31:29.175971+00:00"
+      "updatedAt": "2026-10-19T17:02:21.946205+00:00"
     }
   }
 }
