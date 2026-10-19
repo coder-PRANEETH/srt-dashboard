@@ -15,6 +15,7 @@ backend = source[source.index('struct Sample {'):source.index('const char *mime'
 backend += source[source.index('void sendDiagnostics()'):source.index('void sendDashboard()')]
 shim = r'''
 #include <algorithm>
+#include "ThrottleCalibration.h"
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -86,6 +87,7 @@ int main() {
   clockMs = 4000; vehicle("at-3000ms");
   clockMs = 4001; vehicle("stale-switches");
   push(0x301, {0,0}); vehicle("zero");
+  push(0x301, {0x64,0x03}); vehicle("below-idle");
   push(0x301, {255,15}); vehicle("full");
   for (int bit = 0; bit < 7; ++bit) {
     push(0x300, {uint8_t(1 << bit)});
@@ -111,7 +113,7 @@ int main() {
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory)
     (path / 'check.cpp').write_text(shim + backend + scenarios)
-    subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', str(path / 'check.cpp'), '-o', str(path / 'check')], check=True)
+    subprocess.run(['g++', '-I', str(root), '-std=c++17', '-Wall', '-Wextra', str(path / 'check.cpp'), '-o', str(path / 'check')], check=True)
     lines = subprocess.check_output([str(path / 'check')], text=True).splitlines()
 results = {}
 for line in lines:
@@ -125,8 +127,9 @@ def result(name):
 assert result('empty')['acceleratorAdc'] is None
 assert result('empty')['nodes'][1]['alive'] is None
 live = result('live')
-assert live['acceleratorAdc'] == 2000 and live['acceleratorPct'] == 48
-assert live['acceleratorVoltageEstimate'] == 1.612
+assert live['acceleratorAdc'] == 2000 and live['acceleratorPct'] == 35
+assert live['acceleratorVoltageEstimate'] == 0.912
+assert live['acceleratorRawVoltageEstimate'] == 1.612
 assert live['throttleOut'] is None and live['reverseActive'] is None
 assert live['switches']['headlight'] is True and live['switches']['autonomous'] is False
 assert live['nodes'][0]['alive'] is True and live['nodes'][2]['alive'] is True
@@ -177,3 +180,7 @@ assert result('diagnostics-domain')['malformedFrames'] == 7
 assert result('diagnostics-domain')['signals'][2]['invalid'] == 1
 assert result('diagnostics-domain')['signals'][4]['invalid'] == 1
 print('Invalid GPS and IMU payloads cannot replace valid samples')
+
+assert result("below-idle")["acceleratorVoltageEstimate"] == 0
+assert result("below-idle")["acceleratorPct"] == 0
+assert result("full")["acceleratorVoltageEstimate"] == 2.6

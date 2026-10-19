@@ -4,6 +4,8 @@ export const hex = value => `0x${value.toString(16).toUpperCase().padStart(3, '0
 export const onOff = value => value === true ? 'ON' : value === false ? 'OFF' : '—'
 export const ageText = ms => number(ms) ? ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s` : 'No data'
 export const NODE_NAMES = ['Accelerator', 'Motor control', 'Switch inputs', 'GPS / IMU', 'Dashboard']
+export const throttleVoltage = adc => Math.max(0, adc * 3.3 / 4095 - 0.7)
+export const throttlePercent = adc => Math.min(100, Math.floor(throttleVoltage(adc) * 100 / 2.6 + 1e-9))
 export const SWITCHES = ['cruise', 'eco', 'reverse', 'hill', 'horn', 'headlight', 'autonomous']
 export const freshFeed = (feed, now) => feed?.data && now - feed.at < 3500 ? feed.data : null
 export function parseId(text) {
@@ -25,7 +27,7 @@ export function decodeFrame(frame) {
     kind = 'Accelerator input'
     const adc = b[0] + b[1] * 256
     issue = adc > 4095
-    text = issue ? `ADC ${adc} · out of range` : `ADC ${adc}/4095 · ${Math.floor(adc * 100 / 4095)}% · ~${(adc * 3.3 / 4095).toFixed(3)} V`
+    text = issue ? `ADC ${adc} · out of range` : `ADC ${adc}/4095 · ${throttlePercent(adc)}% · ~${throttleVoltage(adc).toFixed(3)} V corrected`
   } else if (id === 0x300) {
     kind = 'Switch inputs'; text = SWITCHES.map((name, n) => `${name} ${bit(n)}`).join(' · ')
   } else if (id === 0x400) {
@@ -69,7 +71,7 @@ export function diagnosticsModel(feeds, now) {
     const status = id === 2 || !v ? 'UNKNOWN' : !live ? 'OFFLINE' : n.error || n.status === 0 ? 'FAULT' : id === 5 ? 'LOCAL' : 'LIVE'
     return { id, name, state: status, age: id === 2 ? 'No feedback' : id === 5 && v ? 'Now' : ageText(number(n?.ageMs) ? n.ageMs : null), error: n?.error, sensors: [] }
   })
-  nodes[0].sensors = [sensor('Pedal ADC', valid(0x301, v?.acceleratorAdc) ? `${v.acceleratorAdc} / 4095` : '—', state(0x301, v?.acceleratorAdc), `GPIO34 · ${detail(0x301)}`), sensor('ADC scale', valid(0x301, v?.acceleratorPct) ? display(v.acceleratorPct, 0, '%') : '—', state(0x301, v?.acceleratorPct)), sensor('Pin voltage', valid(0x301, v?.acceleratorVoltageEstimate) ? display(v.acceleratorVoltageEstimate, 3, ' V') : '—', valid(0x301, v?.acceleratorVoltageEstimate) ? 'ESTIMATE' : 'UNAVAILABLE')]
+  nodes[0].sensors = [sensor('Pedal ADC', valid(0x301, v?.acceleratorAdc) ? `${v.acceleratorAdc} / 4095` : '—', state(0x301, v?.acceleratorAdc), `GPIO34 · ${detail(0x301)}`), sensor('Throttle', valid(0x301, v?.acceleratorPct) ? display(v.acceleratorPct, 0, '%') : '—', state(0x301, v?.acceleratorPct)), sensor('Corrected voltage', valid(0x301, v?.acceleratorVoltageEstimate) ? display(v.acceleratorVoltageEstimate, 3, ' V') : '—', valid(0x301, v?.acceleratorVoltageEstimate) ? 'ESTIMATE' : 'UNAVAILABLE', 'Raw − 0.7 V'), sensor('Raw pin voltage', valid(0x301, v?.acceleratorRawVoltageEstimate) ? display(v.acceleratorRawVoltageEstimate, 3, ' V') : '—', 'ESTIMATE')]
   nodes[1].sensors = [sensor('Motor PWM outputs', 'Unknown', 'NO FEEDBACK', 'GPIO13 / GPIO14'), sensor('Reverse relays', 'Unknown', 'NO FEEDBACK', 'GPIO33 / GPIO26')]
   const pins = [4, 5, 13, 14, 26, 33, 32]
   nodes[2].sensors = SWITCHES.map((key, i) => sensor(key[0].toUpperCase() + key.slice(1), valid(0x300, v?.switches?.[key]) ? onOff(v.switches[key]) : '—', state(0x300, v?.switches?.[key]), `GPIO${pins[i]} · ${detail(0x300)}`))

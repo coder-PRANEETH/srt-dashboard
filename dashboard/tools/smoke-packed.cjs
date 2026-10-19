@@ -6,7 +6,7 @@ const path = require('node:path')
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const root = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'data'))
 const vehicle = {
-  canReady: true, frames: 42, acceleratorAdc: 2000, acceleratorPct: 48, acceleratorVoltageEstimate: 1.612,
+  canReady: true, frames: 42, acceleratorAdc: 2000, acceleratorPct: 35, acceleratorVoltageEstimate: 0.912, acceleratorRawVoltageEstimate: 1.612,
   ignition: true, ignitionUptime: 120, hillRequest: true, pitchDeg: 5, pitchValid: true, holdPct: 0,
   switches: { cruise: true, eco: false, reverse: true, hill: false, horn: false, headlight: true, autonomous: false },
   nodes: [1,2,3,4,5].map(id => ({ id, alive: id === 2 ? null : true, status: id === 2 ? null : 1, error: 0, ageMs: 10 })),
@@ -42,7 +42,7 @@ const server = http.createServer((req,res) => {
     const base = `http://127.0.0.1:${server.address().port}`
     await page.goto(base)
     await page.getByRole('button',{name:'Skip SRT opening animation'}).click()
-    await page.waitForFunction(()=>document.querySelector('.accel-reading')?.textContent==='48%')
+    await page.waitForFunction(()=>document.querySelector('.accel-reading')?.textContent==='35%')
     assert.match(await page.locator('.wheel-reading').innerText(),/\+5.0°/)
     assert.equal(await page.locator('a[href*="status"]').count(),0)
     assert.equal(await page.getByText('CAN LOG',{exact:true}).count(),0)
@@ -69,7 +69,7 @@ const server = http.createServer((req,res) => {
     vehicle.acceleratorPct=0
     await page.waitForFunction(()=>document.querySelector('.accel-reading')?.textContent==='0%')
     await page.reload();assert.equal(await page.locator('.launch').count(),0)
-    vehicle.acceleratorPct=48;vehicle.pitchDeg=5;vehicle.pitchValid=true
+    vehicle.acceleratorPct=35;vehicle.pitchDeg=5;vehicle.pitchValid=true
     await page.goto(base+'/status/')
     await page.getByText('CONNECTED',{exact:true}).waitFor()
     await page.locator('.node').nth(1).click();assert.match(await page.locator('.node-detail').innerText(),/NO FEEDBACK/)

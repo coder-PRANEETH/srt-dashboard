@@ -7,6 +7,7 @@
 
 #include <SPI.h>
 #include <mcp_can.h>
+#include "ThrottleCalibration.h"
 
 #define ACCELERATOR_PIN 34
 
@@ -68,19 +69,19 @@ void loop() {
       (CAN.sendMsgBuf(ACCEL_CAN_ID, 0, 2, data) == CAN_OK);
     if (lastSendOK) { ++txOK; lastTxAt = millis(); }
     else ++txFailed;
-    if (lastSendOK) Serial.printf("[%lu ms] CAN TX ID=0x301 DLC=2 | accelerator ADC=%d/4095 | voltage estimate=%.3f V\n",
-                                  millis(), acceleratorADC, acceleratorADC * (3.3f / 4095.0f));
+    if (lastSendOK) Serial.printf("[%lu ms] CAN TX ID=0x301 DLC=2 | accelerator ADC=%d/4095 | corrected voltage estimate=%.3f V\n",
+                                  millis(), acceleratorADC, throttleVoltage(acceleratorADC));
   }
 
   if (now - lastPrint >= PRINT_INTERVAL_MS) {
     lastPrint = now;
 
     Serial.printf("[%lu ms] Node 1 | TX OK=%lu failed=%lu | ", now, txOK, txFailed);
-    float voltage = acceleratorADC * (3.3f / 4095.0f);
+    float voltage = throttleVoltage(acceleratorADC);
 
     Serial.print("Accelerator ADC: ");
     Serial.print(acceleratorADC);
-    Serial.print("/4095 | Voltage estimate: ");
+    Serial.print("/4095 | Corrected voltage estimate: ");
     Serial.print(voltage, 3);
     Serial.print(" V | CAN: ");
 

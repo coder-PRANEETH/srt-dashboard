@@ -26,6 +26,7 @@ Shared CAN connection (classic ESP32 + MCP2515):
 */
 
 #include "CanCommon.h"
+#include "ThrottleCalibration.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
@@ -146,9 +147,10 @@ void sendVehicle() {
   j += ",\"hillActive\":" + maybeBool(m, motor->bytes[6]);
   const uint16_t adc = le16(accel->bytes);
   j += ",\"acceleratorAdc\":" + maybeNumber(p, adc);
-  // Display ADC full-scale percent, not a measured motor output or calibrated pedal travel.
-  j += ",\"acceleratorPct\":" + maybeNumber(p, (uint32_t)adc * 100 / 4095);
-  j += ",\"acceleratorVoltageEstimate\":" + maybeNumber(p, adc * (3.3f / 4095.0f), 3);
+  // Remove the measured idle offset; retain raw ADC and raw pin-voltage estimate.
+  j += ",\"acceleratorPct\":" + maybeNumber(p, throttlePercent(adc));
+  j += ",\"acceleratorVoltageEstimate\":" + maybeNumber(p, throttleVoltage(adc), 3);
+  j += ",\"acceleratorRawVoltageEstimate\":" + maybeNumber(p, throttleRawVoltage(adc), 3);
   j += ",\"brake\":" + maybeBool(b, brake->bytes[0]);
   j += ",\"ignition\":" + maybeBool(i, ign->bytes[0]);
   j += ",\"ignitionUptime\":" + maybeNumber(i, be16(ign->bytes+1));

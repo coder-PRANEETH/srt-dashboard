@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { decodeFrame, diagnosticsModel, display, filterFrames, parseId } from '../src/diagnostics.js'
+import { decodeFrame, diagnosticsModel, display, filterFrames, parseId, throttleVoltage, throttlePercent } from '../src/diagnostics.js'
 import { advanceTrack } from '../src/useTelemetry.js'
 const frame = (id, data) => decodeFrame({ seq: 1, ms: 1000, id, data, dlc: data.length })
 test('decode actual short payloads, zero and malformed frames', () => {
-  assert.match(frame(0x301,[0xd0,7]).text,/2000\/4095 · 48%/)
+  assert.match(frame(0x301,[0xd0,7]).text,/2000\/4095 · 35%/)
   assert.match(frame(0x301,[0,0]).text,/0\/4095 · 0%/)
   assert.match(frame(0x300,[0x25]).text,/cruise ON · eco OFF · reverse ON/)
   assert.equal(frame(0x301,[0,16]).issue,true)
@@ -45,4 +45,12 @@ test('trip rejects jitter/jumps, avoids outage distance, bounds route history', 
   for(let n=1;n<700;n++)route=advanceTrack(route,{fix:true,lat:10.728+n*.00004,lon:79.0195},1000+n*1000)
   assert.equal(route.points.length,600)
   assert.ok(route.trip>0);assert.equal(Math.round(route.heading),0)
+})
+
+test('idle voltage is subtracted once and clamps to zero', () => {
+  assert.equal(throttleVoltage(0),0)
+  assert.equal(throttleVoltage(868),0)
+  assert.equal(throttlePercent(868),0)
+  assert.equal(throttlePercent(4095),100)
+  assert.ok(Math.abs(throttleVoltage(2000)-0.9117216)<0.000001)
 })
