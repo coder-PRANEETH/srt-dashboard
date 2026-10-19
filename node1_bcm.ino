@@ -9,6 +9,7 @@
 #include <mcp_can.h>
 #include "ThrottleCalibration.h"
 #include "SteeringControl.h"
+#include "RemoteDrive.h"
 #include <esp_system.h>
 
 #define ACCELERATOR_PIN 34
@@ -57,6 +58,9 @@ unsigned long lastPrint = 0;
 bool canReady = false;
 unsigned long txOK = 0, txFailed = 0, lastTxAt = 0;
 
+RemoteDriveGate driveGate;
+uint32_t driveStatusAt=0, drivePeerAt=0, drivePeerSession=0;
+bool drivePeerNormal=false, drivePeerSeen=false;
 int acceleratorADC = 0;
 bool lastSendOK = false;
 
@@ -65,6 +69,14 @@ void receiveSteering() {
   for (uint8_t n=0; n<4 && canReady && CAN.checkReceive() == CAN_MSGAVAIL; ++n) {
     unsigned long id = 0; byte len = 0, data[8] = {};
     if (CAN.readMsgBuf(&id, &len, data) != CAN_OK) break;
+    if(id==DRIVE_SWITCH_STATUS_ID && len==8 && data[3]==0xD1) {
+      drivePeerNormal=(data[0]&3)==0; drivePeerSession=driveRead32(data+4);
+      drivePeerAt=millis(); drivePeerSeen=true;
+    }
+    if(id==DRIVE_GATE_ID) {
+      driveGate.accept(data,len,1,acceleratorADC<=DRIVE_IDLE_ADC,
+        drivePeerSeen && drivePeerNormal && drivePeerSession==driveGate.session && millis()-drivePeerAt<350,millis());
+    }
     if (id == STEERING_COMMAND_ID) {
       const uint32_t before = steering.token;
       steering.accept(data, len, millis());
@@ -73,6 +85,11 @@ void receiveSteering() {
     }
     serviceSteering();
   }
+}
+void sendDriveGateStatus() {
+  if(!canReady || millis()-driveStatusAt<100) return;
+  byte data[8]; driveGate.status(data,acceleratorADC); driveStatusAt=millis();
+  if(CAN.sendMsgBuf(DRIVE_PEDAL_STATUS_ID,0,8,data)!=CAN_OK) driveGate.lock();
 }
 void sendSteeringStatus() {
   if (!canReady || (!steeringStatusPending && millis()-lastSteeringStatus < 100)) return;
@@ -111,24 +128,25 @@ void setup() {
 }
 
 void loop() {
+  acceleratorADC = analogRead(ACCELERATOR_PIN);
+  driveGate.tick(millis(),acceleratorADC<=DRIVE_IDLE_ADC);
   serviceSteering(); receiveSteering(); serviceSteering();
   unsigned long now = millis();
 
-  acceleratorADC = analogRead(ACCELERATOR_PIN);
-
-  if (canReady && now - lastSend >= SEND_INTERVAL_MS) {
+  if (canReady && driveGate.phase!=1 && now - lastSend >= SEND_INTERVAL_MS) {
     lastSend = now;
 
     byte data[2];
-    data[0] = acceleratorADC & 0xFF;
-    data[1] = (acceleratorADC >> 8) & 0xFF;
+    const uint16_t transmittedADC=driveGate.phase ? 0 : acceleratorADC;
+    data[0] = transmittedADC & 0xFF;
+    data[1] = (transmittedADC >> 8) & 0xFF;
 
     lastSendOK =
       (CAN.sendMsgBuf(ACCEL_CAN_ID, 0, 2, data) == CAN_OK);
     if (lastSendOK) { ++txOK; lastTxAt = millis(); }
     else { ++txFailed; if (steering.direction) { steering.stop(1); applySteering(); } }
     if (lastSendOK) Serial.printf("[%lu ms] CAN TX ID=0x301 DLC=2 | accelerator ADC=%d/4095 | corrected voltage estimate=%.3f V\n",
-                                  millis(), acceleratorADC, throttleVoltage(acceleratorADC));
+                                  millis(), transmittedADC, throttleVoltage(transmittedADC));
   }
 
   if (now - lastPrint >= PRINT_INTERVAL_MS) {
@@ -151,6 +169,8 @@ void loop() {
     }
   }
 
+  driveGate.tick(millis(),acceleratorADC<=DRIVE_IDLE_ADC);
+  sendDriveGateStatus();
   serviceSteering(); sendSteeringStatus(); serviceSteering();
   delay(1);
 }

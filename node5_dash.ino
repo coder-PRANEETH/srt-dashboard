@@ -28,6 +28,7 @@ Shared CAN connection (classic ESP32 + MCP2515):
 #include "CanCommon.h"
 #include "ThrottleCalibration.h"
 #include "SteeringControl.h"
+#include "RemoteDrive.h"
 #include <esp_system.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -40,10 +41,18 @@ const char *AP_PASS = "12345678"; // Change before deployment.
 WebServer server(80);
 struct Sample { uint8_t bytes[8] = {}; uint8_t len = 0; uint32_t at = 0, received = 0, invalid = 0; bool seen = false; };
 SteeringRelay steeringRelay;
-const uint16_t ids[] = {0x111,0x100,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x400,0x401,0x500,0x501};
+struct DriveHost {
+  uint32_t token=1, session=0, lastHttp=0, started=0, lastTx=0, settledAt=0, stoppedAt=0;
+  uint16_t httpSeq=0, gateSeq=0, adc=0;
+  uint8_t percent=0;
+  bool held=false, paired=false, reverse=false, wireReverse=false, directionSet=false;
+  const char *reason="";
+} drive;
+void serviceDrive();
+const uint16_t ids[] = {0x121,0x122,0x111,0x100,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x400,0x401,0x500,0x501};
 Sample samples[sizeof(ids)/sizeof(ids[0])];
 struct NodeState { uint8_t status = 0, error = 0, tx = 0, rx = 0; uint32_t at = 0; bool seen = false; } nodes[6];
-struct LogFrame { uint32_t seq, ms, id; uint8_t len, bytes[8]; } logFrames[64];
+struct LogFrame { uint32_t seq, ms, id; uint8_t len, bytes[8]; bool tx=false; } logFrames[64];
 uint8_t logNext = 0, logCount = 0;
 uint32_t frameCount = 0, lastBeat = 0, malformedFrames = 0, unknownFrames = 0;
 bool fsReady = false;
@@ -69,7 +78,7 @@ void readCan() {
     const uint32_t now = millis();
     ++frameCount;
     LogFrame &f = logFrames[logNext];
-    f.seq = frameCount; f.ms = now; f.id = id; f.len = len; memcpy(f.bytes, data, 8);
+    f.tx=false; f.seq = frameCount; f.ms = now; f.id = id; f.len = len; memcpy(f.bytes, data, 8);
     logNext = (logNext + 1) % 64; if (logCount < 64) ++logCount;
     if (id == 0x600 && len == 8 && data[0] >= 1 && data[0] <= 5) {
       NodeState &n = nodes[data[0]];
@@ -82,6 +91,7 @@ void readCan() {
        (data[0] < 90 || be16(data+1) == 0) && (data[3] < 180 || be16(data+4) == 0));
     const bool validPitch = id != 0x500 || !data[3] || data[1] <= 180;
     const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095) && validGps && validPitch &&
+      ((id != 0x121 && id != 0x122) || (data[3]==0xD1 && (data[0]&0x7F)<=2 && le16(data+1)<=(id==0x121 ? 4095 : 127))) &&
       (id != STEERING_STATUS_ID || (data[0] <= 2 && data[1] == (data[0] ? STEERING_PWM : 0) && data[3] == 1));
     if (s) { ++s->received; if (!validPayload) { ++s->invalid; ++malformedFrames; } }
     else if (id == 0x600) { if (len != 8 || data[0] < 1 || data[0] > 5) ++malformedFrames; }
@@ -175,8 +185,9 @@ void sendVehicle() {
       continue;
     }
     if (n == 1 || n == 3) {
-      const Sample *signal = n == 1 ? accel : sw;
-      const bool alive = n == 1 ? p : s;
+      const Sample *gate = sampleFor(n==1 ? 0x121 : 0x122);
+      const Sample *signal = fresh(gate,350) ? gate : n == 1 ? accel : sw;
+      const bool alive = fresh(gate,350) || (n == 1 ? p : s);
       j += "{\"id\":" + String(n) + ",\"alive\":" + (alive ? "true" : "false");
       j += ",\"source\":\"data\",\"status\":null,\"error\":null,\"tx\":null,\"rx\":null";
       j += ",\"ageMs\":" + (signal->seen ? String(millis() - signal->at) : "null");
@@ -198,7 +209,14 @@ void sendVehicle() {
   j += ",\"direction\":" + maybeNumber(steeringFresh, st->bytes[0]);
   j += ",\"pwm\":" + maybeNumber(steeringFresh, st->bytes[1]);
   j += ",\"reason\":" + maybeNumber(steeringFresh, st->bytes[2]);
-  j += ",\"ageMs\":" + (st->seen ? String(millis()-st->at) : "null") + "}}";
+  j += ",\"ageMs\":" + (st->seen ? String(millis()-st->at) : "null") + "}";
+  const Sample *dp=sampleFor(0x121), *ds=sampleFor(0x122);
+  j+=",\"remoteDrive\":{\"active\":"+String(drive.held?"true":"false")+",\"adc\":"+String(drive.adc);
+  j+=",\"reverse\":"+String(drive.wireReverse?"true":"false")+",\"reason\":\""+String(drive.reason)+"\"";
+  j+=",\"pedalAdc\":"+maybeNumber(fresh(dp,350),le16(dp->bytes+1));
+  j+=",\"switchMask\":"+maybeNumber(fresh(ds,350),ds->bytes[1]);
+  j+=",\"pedalGate\":"+maybeNumber(fresh(dp,350),dp->bytes[0]&3);
+  j+=",\"switchGate\":"+maybeNumber(fresh(ds,350),ds->bytes[0]&3)+"}}";
   jsonHeader(); server.send(200, "application/json", j);
 }
 void sendCanLog() {
@@ -233,7 +251,7 @@ void sendCanLog() {
     if (filtered && f.id != filterId) continue;
     if (!first) j += ',';
     first = false;
-    j += "{\"seq\":"+String(f.seq)+",\"ms\":"+String(f.ms)+",\"id\":"+String(f.id)+",\"dlc\":"+String(f.len)+",\"data\":[";
+    j += "{\"seq\":"+String(f.seq)+",\"ms\":"+String(f.ms)+",\"id\":"+String(f.id)+",\"dlc\":"+String(f.len)+",\"tx\":"+String(f.tx ? "true" : "false")+",\"data\":[";
     for (uint8_t k=0;k<f.len;++k) { if (k) j+=','; j+=String(f.bytes[k]); }
     j += "]}";
   }
@@ -260,7 +278,7 @@ bool sendFile(String path) {
   server.setContentLength(f.size()); server.send(200, mime(path), "");
   char chunk[1024];
   while (f.available() && server.client().connected()) {
-    readCan(); size_t n=f.readBytes(chunk, sizeof(chunk)); server.sendContent(chunk, n); yield();
+    readCan(); serviceDrive(); size_t n=f.readBytes(chunk, sizeof(chunk)); server.sendContent(chunk, n); yield();
   }
   f.close(); readCan(); return true;
 }
@@ -282,9 +300,9 @@ void sendDiagnostics() {
   j += ",\"lastRxAgeMs\":" + (canRxTotal ? String(millis() - canLastRxAt) : "null");
   j += ",\"malformedFrames\":" + String(malformedFrames) + ",\"unknownFrames\":" + String(unknownFrames);
   j += ",\"signals\":[";
-  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500,0x111};
-  const uint16_t timeouts[] = {501,3001,3000,3000,1000,600};
-  for (uint8_t n=0; n<6; ++n) {
+  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500,0x111,0x121,0x122};
+  const uint16_t timeouts[] = {501,3001,3000,3000,1000,600,350,350};
+  for (uint8_t n=0; n<8; ++n) {
     const Sample *s = sampleFor(signalIds[n]);
     if (n) j += ',';
     j += "{\"id\":" + String(signalIds[n]) + ",\"seen\":" + String(s->seen ? "true" : "false");
@@ -365,8 +383,125 @@ void handleSteeringCommand() {
   sendSteeringState();
 }
 
+bool driveCapable() {
+  return canReady && fresh(sampleFor(0x121),250) && fresh(sampleFor(0x122),250);
+}
+bool drivePedalIdle() { return driveCapable() && le16(sampleFor(0x121)->bytes+1)<=DRIVE_IDLE_ADC; }
+bool driveGateAt(uint16_t id, uint8_t phase) {
+  const Sample *s=sampleFor(id);
+  return fresh(s,250) && (s->bytes[0]&3)==phase && driveRead32(s->bytes+4)==drive.session;
+}
+bool driveReady() {
+  return drivePedalIdle() && (drive.held || ((sampleFor(0x121)->bytes[0]&3)!=1 && (sampleFor(0x122)->bytes[0]&3)!=1));
+}
+bool driveCanShift() { return !drive.held && (!drive.session || millis()-drive.stoppedAt>=DRIVE_SETTLE_MS); }
+template<size_t N> bool driveSend(uint32_t id, const uint8_t (&data)[N]) {
+  if(!canSend(id,data)) return false;
+  LogFrame &f=logFrames[logNext]; f.seq=++frameCount; f.ms=millis(); f.id=id; f.len=N; f.tx=true;
+  memset(f.bytes,0,8); memcpy(f.bytes,data,N);
+  logNext=(logNext+1)%64; if(logCount<64) ++logCount;
+  return true;
+}
+bool sendDriveGate(uint8_t op) {
+  uint8_t data[8]={op,(uint8_t)drive.wireReverse,0,0,0,0,0,0};
+  driveWrite32(data+2,drive.session); ++drive.gateSeq;
+  data[6]=drive.gateSeq; data[7]=drive.gateSeq>>8;
+  return driveSend(DRIVE_GATE_ID,data);
+}
+bool sendDriveAdc(uint16_t adc) {
+  const uint8_t data[2]={(uint8_t)adc,(uint8_t)(adc>>8)};
+  const bool sent=driveSend(0x301,data); drive.adc=sent ? adc : 0; return sent;
+}
+void stopDrive(const char *reason="") {
+  if(drive.held) drive.stoppedAt=millis();
+  drive.held=false; drive.paired=false; drive.percent=0; drive.adc=0; drive.reason=reason;
+  if(++drive.token==0) ++drive.token;
+  if(drive.session) { sendDriveAdc(0); sendDriveGate(0); }
+}
+void serviceDrive() {
+  const uint32_t now=millis();
+  if(drive.held && (now-drive.lastHttp>=DRIVE_LEASE_MS || now-drive.started>=DRIVE_HOLD_MS)) stopDrive("RELEASE & RETRY");
+  if(drive.held && !drivePedalIdle()) stopDrive("PEDAL / LINK FAULT");
+  if(!drive.session || now-drive.lastTx<50) return;
+  drive.lastTx=now;
+  if(!drive.held) {
+    // Nodes latch zero/held direction on expiry. Restore switches before pedal.
+    if(driveGateAt(0x121,0) && driveGateAt(0x122,0)) { drive.session=0; return; }
+    sendDriveAdc(0); sendDriveGate(0);
+    if(drivePedalIdle() && now-drive.stoppedAt>=DRIVE_SETTLE_MS && bool(sampleFor(0x122)->bytes[1]&4)==drive.wireReverse) {
+      if(driveGateAt(0x122,2)) sendDriveGate(2);
+      else if(driveGateAt(0x122,0)) sendDriveGate(3);
+    }
+    return;
+  }
+  const bool paired=driveGateAt(0x121,1) && driveGateAt(0x122,1);
+  if(drive.paired && !paired) { stopDrive("HANDOFF LOST"); return; }
+  if(!paired && now-drive.started>=600) { stopDrive("HANDOFF FAILED"); return; }
+  if(paired && !drive.paired) { drive.paired=true; drive.settledAt=now; }
+  // First hold the old direction at zero; then switch and settle again.
+  if(paired && drive.wireReverse!=drive.reverse && now-drive.settledAt>=DRIVE_SETTLE_MS) {
+    drive.wireReverse=drive.reverse; drive.settledAt=now;
+  }
+  if(!sendDriveGate(1)) { stopDrive("CAN SEND FAILED"); return; }
+  if(!paired) return;
+  const uint8_t switches[1]={driveSwitchMask(sampleFor(0x122)->bytes[1],drive.wireReverse)};
+  const bool directionAck=bool(sampleFor(0x121)->bytes[0]&0x80)==drive.wireReverse && bool(sampleFor(0x122)->bytes[0]&0x80)==drive.wireReverse;
+  const uint16_t adc=directionAck && drive.wireReverse==drive.reverse && now-drive.settledAt>=DRIVE_SETTLE_MS ? (uint32_t)drive.percent*4095/100 : 0;
+  if(!driveSend(0x300,switches) || !sendDriveAdc(adc)) stopDrive("CAN SEND FAILED");
+}
+void sendDriveState() {
+  readCan(); serviceDrive();
+  const bool capable=driveCapable();
+  if(capable && !drive.directionSet && !drive.session) drive.reverse=bool(sampleFor(0x122)->bytes[1]&4);
+  const char *message=drive.reason;
+  if(!capable) message="NODES 1 / 3 UNAVAILABLE";
+  else if(!drivePedalIdle()) message="RELEASE PEDAL";
+  else if(drive.held && !drive.adc) message="ARMING";
+  else if(!drive.held && drive.session && bool(sampleFor(0x122)->bytes[1]&4)!=drive.wireReverse) message="MATCH REVERSE SWITCH";
+  String j="{\"ready\":"+String(driveReady()?"true":"false")+",\"token\":"+String(drive.token);
+  j+=",\"held\":"+String(drive.held?"true":"false")+",\"adc\":"+String(drive.adc)+",\"percent\":"+String(drive.percent);
+  j+=",\"reverse\":"+String(drive.reverse?"true":"false")+",\"canShift\":"+String(driveCanShift()?"true":"false");
+  j+=",\"message\":\""+String(message)+"\",\"timeoutMs\":350,\"holdMs\":5000}";
+  server.sendHeader("Cache-Control","no-store"); server.send(200,"application/json",j);
+}
+void handleDriveCommand() {
+  server.sendHeader("Cache-Control","no-store");
+  if(server.header("X-SRT-Control")!="1" || (server.hasHeader("Origin") && server.header("Origin")!="http://"+server.hostHeader())) {
+    server.send(403,"application/json","{\"error\":\"Same-origin control required\"}"); return;
+  }
+  readCan(); serviceDrive();
+  const String action=server.arg("action");
+  if(action=="stop") { stopDrive(); sendDriveState(); return; }
+  uint32_t token=0,seq=0,percent=0,reverse=0;
+  if(!steeringDecimal(server.arg("token"),token) || (action!="throttle" && action!="reverse") ||
+    (action=="throttle" && (!steeringDecimal(server.arg("seq"),seq) || !seq || seq>65535 || !steeringDecimal(server.arg("percent"),percent) || percent<1 || percent>100)) ||
+    (action=="reverse" && (!steeringDecimal(server.arg("reverse"),reverse) || reverse>1))) {
+    stopDrive("INVALID COMMAND"); server.send(400,"application/json","{\"error\":\"Invalid drive command\"}"); return;
+  }
+  if(token!=drive.token || !driveReady() || (action=="reverse" && !driveCanShift())) {
+    stopDrive("RELEASE & RETRY"); server.send(409,"application/json","{\"error\":\"Release and retry\"}"); return;
+  }
+  if(action=="reverse") {
+    drive.reverse=reverse; drive.directionSet=true; drive.reason="";
+    if(++drive.token==0) ++drive.token;
+    sendDriveState(); return;
+  }
+  if(drive.held && (seq<=drive.httpSeq || percent!=drive.percent)) {
+    stopDrive("RELEASE & RETRY"); server.send(409,"application/json","{\"error\":\"Release and retry\"}"); return;
+  }
+  if(!drive.held) {
+    drive.session=drive.token; drive.gateSeq=0; drive.started=millis(); drive.paired=false;
+    const Sample *sw=sampleFor(0x122);
+    drive.wireReverse=(sw->bytes[0]&3)==2 ? bool(sw->bytes[0]&0x80) : bool(sw->bytes[1]&4);
+    drive.percent=percent; drive.held=true; drive.reason="";
+    drive.lastTx=millis()-50;
+  }
+  drive.httpSeq=seq; drive.lastHttp=millis(); sendDriveState();
+}
+
 void setup() {
   Serial.begin(115200);
+  drive.token=esp_random(); if(!drive.token) drive.token=1;
   steeringRelay.token = esp_random(); if (!steeringRelay.token) steeringRelay.token = 1;
   fsReady = LittleFS.begin(false);
   if (!fsReady) Serial.println("LittleFS unavailable: upload data/");
@@ -374,6 +509,8 @@ void setup() {
   WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID, AP_PASS); WiFi.setSleep(false);
   const char *controlHeaders[] = {"X-SRT-Control", "Origin"};
   server.collectHeaders(controlHeaders, 2);
+  server.on("/api/drive", HTTP_GET, sendDriveState);
+  server.on("/api/drive", HTTP_POST, handleDriveCommand);
   server.on("/api/steering", HTTP_GET, sendSteeringState);
   server.on("/api/steering", HTTP_POST, handleSteeringCommand);
   server.on("/api/data", sendSpeed); server.on("/api/gps", sendGps);
@@ -389,7 +526,7 @@ void setup() {
   server.begin(); Serial.print("Dashboard: http://"); Serial.println(WiFi.softAPIP());
 }
 void loop() {
-  serviceSteeringRelay(); readCan(); server.handleClient(); readCan(); serviceSteeringRelay();
+  readCan(); serviceDrive(); serviceSteeringRelay(); server.handleClient(); readCan(); serviceDrive(); serviceSteeringRelay();
   if (millis()-lastBeat >= 1000) { lastBeat=millis(); canPrintStatus("Node 5 dashboard");
     Serial.printf("Dashboard: WiFi clients=%u LittleFS=%s buffered frames=%u total frames=%lu | Node 1=%s Node 3=%s | Node 2=receive-only\n",
                   WiFi.softAPgetStationNum(), fsReady ? "READY" : "MISSING", logCount, (unsigned long)frameCount,

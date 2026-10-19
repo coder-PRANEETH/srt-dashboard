@@ -56,7 +56,7 @@ The repository root contains the five working sketches:
 
 `CanCommon.h` is shared by Nodes 4/5. **Nodes 1 and 5 also require `ThrottleCalibration.h` and `SteeringControl.h`** in their individual sketch folders. Temporary test sketches and the standalone CAN monitor have been removed.
 
-Compile each node separately: Arduino combines all `.ino` files in a sketch folder, so do not compile the repository root as one sketch. Copy the desired `.ino` into a separate folder with the same base name (for example, `node4_tcu/node4_tcu.ino`) outside this repository. For Nodes 4/5, copy `CanCommon.h` into that folder too. For Nodes 1/5, also copy `ThrottleCalibration.h` and `SteeringControl.h`. For Node 5, copy the rebuilt root `data/` directory into its sketch folder before uploading LittleFS. Open that individual sketch in Arduino IDE. Use classic **ESP32 Dev Module**, with the ESP32 board package, `mcp_can`, `TinyGPSPlus`, `Adafruit_MPU6050`, `Adafruit_Sensor` and `Adafruit_BusIO` libraries. Node 5 needs **No OTA (2MB APP/2MB SPIFFS)** and a LittleFS uploader.
+Compile each node separately: Arduino combines all `.ino` files in a sketch folder, so do not compile the repository root as one sketch. Copy the desired `.ino` into a separate folder with the same base name (for example, `node4_tcu/node4_tcu.ino`) outside this repository. For Nodes 4/5, copy `CanCommon.h` into that folder too. For Nodes 1/5, also copy `ThrottleCalibration.h` and `SteeringControl.h`. For Nodes 1/3/5, also copy `RemoteDrive.h`. For Node 5, copy the rebuilt root `data/` directory into its sketch folder before uploading LittleFS. Open that individual sketch in Arduino IDE. Use classic **ESP32 Dev Module**, with the ESP32 board package, `mcp_can`, `TinyGPSPlus`, `Adafruit_MPU6050`, `Adafruit_Sensor` and `Adafruit_BusIO` libraries. Node 5 needs **No OTA (2MB APP/2MB SPIFFS)** and a LittleFS uploader.
 
 ```bash
 cd dashboard
@@ -72,6 +72,16 @@ The switch panel shows all seven inputs. Node 1 accelerator data expires after 5
 
 The home page contains driving instruments and the **STEER** control: GPS speed, IMU pitch, corrected accelerator percentage, trip, heading and satellites. **MAP** opens the offline map fullscreen; **CLOSE** or Escape returns. Its SRT opening animation runs once per tab session and honors reduced motion. The wheel follows **IMU pitch**, not steering angle; missing pitch freezes the last angle and shows unavailable.
 
+
+### Mobile throttle and reverse
+
+Upload **Nodes 1, 3 and 5 together**, with `RemoteDrive.h` in all three sketch folders, plus rebuilt Node 5 LittleFS assets. The host simulates the existing receiver protocol: `0x301`, DLC 2, raw 12-bit ADC little-endian; `0x300`, DLC 1, reverse in bit 2. No traction GPIO assignments or Node 2 code are changed. **The checked-in Node 2 is ADC-only and cannot drive a motor.** These controls require the vehicle's working CAN motor receiver; its motor output and stop watchdog cannot be verified from this repository.
+
+The mobile control panel has an adjustable **ADC %**, initially zero: `ADC = percent × 4095 / 100`. This is the transmitted raw input scale, not traction PWM or the offset-corrected gauge percentage. Hold THROTTLE to send it; release to send zero. REVERSE selects the next direction only with no held throttle and at least one second at zero. A reversal holds the old direction at zero for one second, switches direction, then waits another second before throttle. This interlock measures zero command time, **not vehicle speed**; select direction only when physically stationary.
+
+The host first asks Nodes 1/3 to silence their normal `0x301`/`0x300` broadcasts. Both must acknowledge the same session before the host sends simulated input every 50 ms. Physical pedal above the 0.7 V idle threshold, missing acknowledgements, CAN send failure, 350 ms command expiry or a 5-second hold ends the gesture. Nodes independently latch zero throttle/held direction on lease expiry. Cruise and autonomous bits are cleared during simulation; other switch bits are preserved. Recovery requires a new press. Loss of the physical CAN bus still requires the working Node 2 receiver's own output watchdog; a CAN zero command is not a brake.
+
+After release, normal switches return before the pedal sender. The physical pedal must be idle and the physical reverse switch must match the last transmitted direction; otherwise zero remains latched. `MATCH REVERSE SWITCH` identifies that condition. `0x120` carries the handoff command; `0x121` and `0x122` report physical inputs and ownership. `/api/drive` GET is read-only; same-origin POST with `X-SRT-Control: 1` accepts `action=throttle` (`token`, increasing `seq`, `percent`), `action=reverse` (`token`, `reverse=0|1`), or `action=stop`. Outgoing simulation frames are marked `tx` in the bounded CAN log. `/api/vehicle.remoteDrive` reports command state and physical input/gate feedback separately.
 
 ### Remote steering
 

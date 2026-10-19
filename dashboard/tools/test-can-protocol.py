@@ -18,6 +18,7 @@ shim = r'''
 #include <algorithm>
 #include "ThrottleCalibration.h"
 #include "SteeringControl.h"
+#include "RemoteDrive.h"
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -146,11 +147,12 @@ int main() {
   handleSteeringCommand(); assert(server.code==503 && outgoing.back().data[0]==0);
   server.args["direction"]="stop"; handleSteeringCommand(); assert(server.code==200 && outgoing.back().data[0]==0);
 
+  testDrive();
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory)
-    (path / 'check.cpp').write_text(shim + backend + scenarios)
+    (path / 'check.cpp').write_text(shim + backend + (root / 'dashboard/tools/test-drive-api.h').read_text() + scenarios)
     subprocess.run(['g++', '-I', str(root), '-std=c++17', '-Wall', '-Wextra', str(path / 'check.cpp'), '-o', str(path / 'check')], check=True)
     lines = subprocess.check_output([str(path / 'check')], text=True).splitlines()
 results = {}
@@ -224,3 +226,5 @@ assert result("below-idle")["acceleratorPct"] == 0
 assert result("full")["acceleratorVoltageEstimate"] == 2.6
 
 print("Steering HTTP tests passed: origin/header checks, node capability, PWM60, replay, invalid input, expiry and CAN failure")
+
+print("Remote drive tests passed: CAN ownership, exact legacy frames, reversal, pedal override, expiry, stale ACK, CAN failure and recovery")

@@ -15,6 +15,7 @@
 
 #include <SPI.h>
 #include <mcp_can.h>
+#include "RemoteDrive.h"
 
 #define DPDT1_A  4
 #define DPDT1_B  5
@@ -52,6 +53,8 @@ bool stableState[7];
 unsigned long rawChangedAt[7];
 
 MCP_CAN CAN(CAN_CS);
+RemoteDriveGate driveGate;
+uint32_t driveStatusAt=0;
 
 bool canReady = false;
 unsigned long txOK = 0, txFailed = 0, lastTxAt = 0;
@@ -72,6 +75,22 @@ byte buildPayload() {
   return payload;
 }
 
+void receiveDriveGate() {
+  for(uint8_t n=0;n<4 && CAN.checkReceive()==CAN_MSGAVAIL;++n) {
+    unsigned long id=0; byte len=0,data[8]={};
+    if(CAN.readMsgBuf(&id,&len,data)!=CAN_OK) break;
+    if(id==DRIVE_GATE_ID) {
+      const bool releaseMatches=bool(buildPayload()&4)==driveGate.reverse;
+      driveGate.accept(data,len,3,data[0]==1 || releaseMatches,false,millis());
+    }
+  }
+  driveGate.tick(millis());
+}
+void sendDriveGateStatus() {
+  if(millis()-driveStatusAt<100) return;
+  byte data[8]; driveGate.status(data,buildPayload()); driveStatusAt=millis();
+  if(CAN.sendMsgBuf(DRIVE_SWITCH_STATUS_ID,0,8,data)!=CAN_OK) driveGate.lock();
+}
 void printSwitchStates(byte payload) {
   for (byte i = 0; i < 7; ++i) {
     if (i) Serial.print(" | ");
@@ -145,8 +164,9 @@ void loop() {
     return;
   }
 
-  if (sendPending || now - lastSend >= SEND_INTERVAL_MS) {
-    byte payload = buildPayload();
+  receiveDriveGate(); sendDriveGateStatus();
+  if (driveGate.phase!=1 && (sendPending || now - lastSend >= (driveGate.phase ? 100 : SEND_INTERVAL_MS))) {
+    byte payload = driveGate.phase ? driveSwitchMask(buildPayload(),driveGate.reverse) : buildPayload();
 
     if (CAN.sendMsgBuf(SWITCH_CAN_ID, 0, 1, &payload) == CAN_OK) {
       ++txOK; lastTxAt = millis();
