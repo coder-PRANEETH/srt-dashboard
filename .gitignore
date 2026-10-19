@@ -1,3 +1,6 @@
 # Generated LittleFS assets and image
 /data/
 /build/
+
+# Temporary Superdesign previews
+.superdesign/tmp/

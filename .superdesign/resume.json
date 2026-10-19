@@ -28,11 +28,13 @@
       "components": [],
       "drafts": {
         "30d505cc-6133-4cd4-9d73-92eb1f5f8206": {
-          "title": "SRT Telemetry Baseline Reproduction",
-          "visualDirection": "Current cyan twin-gauge instrument cluster"
+          "title": "SRT Telemetry Redesign",
+          "visualDirection": "Graphite and lime cockpit; large numeric speed, segmented accelerator, actual offline map; no diagnostics links",
+          "currentVersion": 3
         }
       },
-      "updatedAt": "2026-10-19T16:05:07.999982+00:00"
+      "updatedAt": "2026-10-19T16:07:54.858804+00:00",
+      "baselineVersion": 1
     }
   }
 }
