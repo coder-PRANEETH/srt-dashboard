@@ -27,6 +27,8 @@ Shared CAN connection (classic ESP32 + MCP2515):
 
 #include "CanCommon.h"
 #include "ThrottleCalibration.h"
+#include "SteeringControl.h"
+#include <esp_system.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
@@ -37,7 +39,8 @@ const char *AP_SSID = "srt-dash";
 const char *AP_PASS = "12345678"; // Change before deployment.
 WebServer server(80);
 struct Sample { uint8_t bytes[8] = {}; uint8_t len = 0; uint32_t at = 0, received = 0, invalid = 0; bool seen = false; };
-const uint16_t ids[] = {0x100,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x400,0x401,0x500,0x501};
+SteeringRelay steeringRelay;
+const uint16_t ids[] = {0x111,0x100,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x400,0x401,0x500,0x501};
 Sample samples[sizeof(ids)/sizeof(ids[0])];
 struct NodeState { uint8_t status = 0, error = 0, tx = 0, rx = 0; uint32_t at = 0; bool seen = false; } nodes[6];
 struct LogFrame { uint32_t seq, ms, id; uint8_t len, bytes[8]; } logFrames[64];
@@ -78,7 +81,8 @@ void readCan() {
       (data[0] <= 90 && data[3] <= 180 && be16(data+1) < 6000 && be16(data+4) < 6000 &&
        (data[0] < 90 || be16(data+1) == 0) && (data[3] < 180 || be16(data+4) == 0));
     const bool validPitch = id != 0x500 || !data[3] || data[1] <= 180;
-    const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095) && validGps && validPitch;
+    const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095) && validGps && validPitch &&
+      (id != STEERING_STATUS_ID || (data[0] <= 2 && data[1] == (data[0] ? STEERING_PWM : 0) && data[3] == 1));
     if (s) { ++s->received; if (!validPayload) { ++s->invalid; ++malformedFrames; } }
     else if (id == 0x600) { if (len != 8 || data[0] < 1 || data[0] > 5) ++malformedFrames; }
     else ++unknownFrames;
@@ -188,7 +192,13 @@ void sendVehicle() {
     }
     j += '}';
   }
-  j += "]}";
+  const Sample *st = sampleFor(STEERING_STATUS_ID);
+  const bool steeringFresh = fresh(st, 600);
+  j += "],\"steering\":{\"available\":" + String(steeringFresh ? "true" : "false");
+  j += ",\"direction\":" + maybeNumber(steeringFresh, st->bytes[0]);
+  j += ",\"pwm\":" + maybeNumber(steeringFresh, st->bytes[1]);
+  j += ",\"reason\":" + maybeNumber(steeringFresh, st->bytes[2]);
+  j += ",\"ageMs\":" + (st->seen ? String(millis()-st->at) : "null") + "}}";
   jsonHeader(); server.send(200, "application/json", j);
 }
 void sendCanLog() {
@@ -272,9 +282,9 @@ void sendDiagnostics() {
   j += ",\"lastRxAgeMs\":" + (canRxTotal ? String(millis() - canLastRxAt) : "null");
   j += ",\"malformedFrames\":" + String(malformedFrames) + ",\"unknownFrames\":" + String(unknownFrames);
   j += ",\"signals\":[";
-  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500};
-  const uint16_t timeouts[] = {501,3001,3000,3000,1000};
-  for (uint8_t n=0; n<5; ++n) {
+  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500,0x111};
+  const uint16_t timeouts[] = {501,3001,3000,3000,1000,600};
+  for (uint8_t n=0; n<6; ++n) {
     const Sample *s = sampleFor(signalIds[n]);
     if (n) j += ',';
     j += "{\"id\":" + String(signalIds[n]) + ",\"seen\":" + String(s->seen ? "true" : "false");
@@ -288,12 +298,84 @@ void sendDiagnostics() {
 void sendDashboard() {
   if (!sendFile("/index.html")) server.send(404,"text/plain","website missing: upload LittleFS data");
 }
+// Steering writes require a same-origin custom-header POST. Read-only telemetry
+// remains public to clients on the dashboard AP; no GET can actuate a motor.
+bool steeringNodeReady() {
+  const Sample *s = sampleFor(STEERING_STATUS_ID);
+  return canReady && fresh(s, 600) && s->bytes[3] == 1;
+}
+void stopSteeringRelay() {
+  steeringRelay.stop();
+  const uint8_t data[8] = {};
+  canSend(STEERING_COMMAND_ID, data);
+}
+void serviceSteeringRelay() {
+  if (steeringRelay.tick(millis())) {
+    const uint8_t data[8] = {};
+    canSend(STEERING_COMMAND_ID, data);
+  }
+}
+void sendSteeringState() {
+  readCan(); serviceSteeringRelay();
+  const Sample *s = sampleFor(STEERING_STATUS_ID);
+  const bool ready = steeringNodeReady();
+  String j = "{\"ready\":" + String(ready ? "true" : "false");
+  j += ",\"token\":" + String(steeringRelay.token);
+  j += ",\"direction\":" + (ready ? String(s->bytes[0]) : "null");
+  j += ",\"pwm\":" + (ready ? String(s->bytes[1]) : "null");
+  j += ",\"reason\":" + (ready ? String(s->bytes[2]) : "null");
+  j += ",\"ageMs\":" + (s->seen ? String(millis()-s->at) : "null");
+  j += ",\"timeoutMs\":350,\"holdMs\":5000}";
+  server.sendHeader("Cache-Control", "no-store"); server.send(200, "application/json", j);
+}
+bool steeringDecimal(const String &s, uint32_t &value) {
+  if (!s.length() || s.length()>10) return false;
+  uint64_t parsed = 0;
+  for (unsigned n=0; n<s.length(); ++n) {
+    if (s[n]<'0' || s[n]>'9') return false;
+    parsed = parsed*10 + (s[n]-'0'); if (parsed>0xFFFFFFFFULL) return false;
+  }
+  value = parsed; return true;
+}
+void handleSteeringCommand() {
+  server.sendHeader("Cache-Control", "no-store");
+  if (server.header("X-SRT-Control") != "1" ||
+      (server.hasHeader("Origin") && server.header("Origin") != "http://" + server.hostHeader())) {
+    server.send(403,"application/json","{\"error\":\"Same-origin control required\"}"); return;
+  }
+  readCan(); serviceSteeringRelay();
+  const String dir = server.arg("direction");
+  if (dir == "stop") { stopSteeringRelay(); sendSteeringState(); return; }
+  uint32_t token, seq;
+  if ((dir != "left" && dir != "right") || !steeringDecimal(server.arg("token"),token) ||
+      !steeringDecimal(server.arg("seq"),seq) || seq == 0 || seq > 65535) {
+    stopSteeringRelay(); server.send(400,"application/json","{\"error\":\"Invalid steering command\"}"); return;
+  }
+  const Sample *s = sampleFor(STEERING_STATUS_ID);
+  const bool ready = steeringNodeReady();
+  if (!steeringRelay.accept(dir=="left" ? 1 : 2, seq, token, steeringRead32(s->bytes+4), ready, millis())) {
+    stopSteeringRelay(); server.send(ready ? 409 : 503,"application/json","{\"error\":\"Release and retry\"}"); return;
+  }
+  uint8_t data[8] = {steeringRelay.direction, STEERING_PWM, (uint8_t)seq, (uint8_t)(seq>>8),0,0,0,0};
+  steeringWrite32(data+4, steeringRelay.nodeToken);
+  if (!canSend(STEERING_COMMAND_ID, data)) {
+    stopSteeringRelay(); server.send(503,"application/json","{\"error\":\"CAN send failed\"}"); return;
+  }
+  // This acknowledges transmission, not physical steering position.
+  sendSteeringState();
+}
+
 void setup() {
   Serial.begin(115200);
+  steeringRelay.token = esp_random(); if (!steeringRelay.token) steeringRelay.token = 1;
   fsReady = LittleFS.begin(false);
   if (!fsReady) Serial.println("LittleFS unavailable: upload data/");
   if (!canBegin()) Serial.println("CAN unavailable: check MCP2515 wiring/crystal");
   WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID, AP_PASS); WiFi.setSleep(false);
+  const char *controlHeaders[] = {"X-SRT-Control", "Origin"};
+  server.collectHeaders(controlHeaders, 2);
+  server.on("/api/steering", HTTP_GET, sendSteeringState);
+  server.on("/api/steering", HTTP_POST, handleSteeringCommand);
   server.on("/api/data", sendSpeed); server.on("/api/gps", sendGps);
   server.on("/api/vehicle", sendVehicle); server.on("/api/can-log", sendCanLog);
   server.on("/api/diagnostics", sendDiagnostics);
@@ -307,7 +389,7 @@ void setup() {
   server.begin(); Serial.print("Dashboard: http://"); Serial.println(WiFi.softAPIP());
 }
 void loop() {
-  readCan(); server.handleClient(); readCan();
+  serviceSteeringRelay(); readCan(); server.handleClient(); readCan(); serviceSteeringRelay();
   if (millis()-lastBeat >= 1000) { lastBeat=millis(); canPrintStatus("Node 5 dashboard");
     Serial.printf("Dashboard: WiFi clients=%u LittleFS=%s buffered frames=%u total frames=%lu | Node 1=%s Node 3=%s | Node 2=receive-only\n",
                   WiFi.softAPgetStationNum(), fsReady ? "READY" : "MISSING", logCount, (unsigned long)frameCount,

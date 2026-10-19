@@ -13,13 +13,18 @@ root = Path(__file__).resolve().parents[2]
 source = (root / 'node5_dash.ino').read_text()
 backend = source[source.index('struct Sample {'):source.index('const char *mime')]
 backend += source[source.index('void sendDiagnostics()'):source.index('void sendDashboard()')]
+backend += source[source.index('bool steeringNodeReady()'):source.index('void setup()')]
 shim = r'''
 #include <algorithm>
 #include "ThrottleCalibration.h"
+#include "SteeringControl.h"
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <map>
+#include <vector>
+#include <cassert>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -53,11 +58,20 @@ struct WifiMock { unsigned softAPgetStationNum(){return 1;} } WiFi;
 struct SerialMock { template<class... T> void printf(const char*, T...) {} } Serial;
 struct Server {
   String filter, body; int code = 0;
-  String arg(const char*) { return filter; }
+  std::map<std::string, String> args, headers;
+  String arg(const char *key) { return std::string(key)=="id" ? filter : args[key]; }
+  String header(const char *key) { return headers[key]; }
+  bool hasHeader(const char *key) { return headers.count(key); }
+  String hostHeader() { return "192.168.4.1"; }
   void sendHeader(const char*, const char*) {}
   void send(int status, const char*, const String &text) { code = status; body = text; }
 } server;
 struct Input { uint32_t id; uint8_t len, data[8] = {}; };
+std::vector<Input> outgoing;
+bool txWorks = true;
+template <size_t N> bool canSend(uint32_t id, const uint8_t (&bytes)[N]) {
+  Input f{}; f.id=id; f.len=N; std::copy(bytes,bytes+N,f.data); outgoing.push_back(f); return txWorks;
+}
 std::deque<Input> incoming;
 void push(uint32_t id, std::initializer_list<uint8_t> bytes) {
   Input f{}; f.id = id; f.len = bytes.size(); std::copy(bytes.begin(), bytes.end(), f.data);
@@ -108,6 +122,30 @@ int main() {
   clockMs = 0xFFFFFFF0; push(0x301, {1,0}); push(0x300, {0}); vehicle("pre-wrap");
   clockMs = 100; vehicle("post-wrap");
   fsReady = true; push(0x777, {1}); sendDiagnostics(); record("diagnostics-wrap");
+  // Exercise the actual HTTP handler with a confirmed Node 1 capability frame.
+  handleSteeringCommand(); assert(server.code==403 && outgoing.empty());
+  server.headers["X-SRT-Control"]="1"; server.headers["Origin"]="http://other-host";
+  handleSteeringCommand(); assert(server.code==403 && outgoing.empty());
+  server.headers["Origin"]="http://192.168.4.1";
+  server.args["direction"]="left"; server.args["token"]=String(steeringRelay.token); server.args["seq"]="1";
+  handleSteeringCommand(); assert(server.code==503 && outgoing.back().data[0]==0);
+  push(0x111, {0,0,0,1,9,0,0,0}); readCan();
+  server.args["token"]=String(steeringRelay.token);
+  handleSteeringCommand(); assert(server.code==200 && outgoing.back().id==0x110);
+  assert(outgoing.back().data[0]==1 && outgoing.back().data[1]==60 && outgoing.back().data[4]==9);
+  handleSteeringCommand(); assert(server.code==409 && outgoing.back().data[0]==0); // replay
+  server.args["token"]=String(steeringRelay.token); server.args["seq"]="2junk";
+  handleSteeringCommand(); assert(server.code==400 && outgoing.back().data[0]==0);
+  server.args["seq"]="1"; server.args["token"]=String(steeringRelay.token);
+  handleSteeringCommand(); assert(server.code==200);
+  clockMs+=350; serviceSteeringRelay(); assert(outgoing.back().data[0]==0);
+  server.args["seq"]="2"; handleSteeringCommand(); assert(server.code==409); // expired gesture
+  server.args["token"]=String(steeringRelay.token); server.args["seq"]="1"; txWorks=false;
+  handleSteeringCommand(); assert(server.code==503 && !steeringRelay.direction); txWorks=true;
+  clockMs+=600; server.args["token"]=String(steeringRelay.token);
+  handleSteeringCommand(); assert(server.code==503 && outgoing.back().data[0]==0);
+  server.args["direction"]="stop"; handleSteeringCommand(); assert(server.code==200 && outgoing.back().data[0]==0);
+
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
@@ -184,3 +222,5 @@ print('Invalid GPS and IMU payloads cannot replace valid samples')
 assert result("below-idle")["acceleratorVoltageEstimate"] == 0
 assert result("below-idle")["acceleratorPct"] == 0
 assert result("full")["acceleratorVoltageEstimate"] == 2.6
+
+print("Steering HTTP tests passed: origin/header checks, node capability, PWM60, replay, invalid input, expiry and CAN failure")
