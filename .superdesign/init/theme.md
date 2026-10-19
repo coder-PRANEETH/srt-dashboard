@@ -1,0 +1,934 @@
+# Current visual tokens
+
+System sans: system-ui, -apple-system, Segoe UI, sans-serif; condensed: Arial Narrow, system-ui. Background #050807, shell #0d1211, wells #141a1a/#1b2222, borders #232c2c/#1a2121. Text #f2f6f6, secondary #9fb0b0, muted #6c7c7c. Accent cyan #35c4e8/#6fe0f2, green #46d17f, amber #e2a33c, red #e2565b. Main radius 14px; smaller elements 6–9px. Body 13px; responsive clamp type and padding. Tight 4–12px gaps. Responsive rules include 900px and 520px. Dark molded instrument cluster, two circular dials and lower map. No external font requests; offline ESP32 hosting is mandatory.
+
+## Raw styles
+
+## `dashboard/src/index.css`
+
+```css
+html { background: #050807; }
+body { min-width: 320px; }
+
+```
+
+## `dashboard/src/App.css`
+
+```css
+/*
+ * No webfont import here on purpose.
+ *
+ * The ESP32 serves this page from its own access point with no
+ * internet, so an @import to fonts.googleapis.com never resolves.
+ * A pending @import blocks the whole stylesheet from applying, so
+ * the dashboard rendered completely unstyled on the car.
+ *
+ * The --sans / --cond stacks below fall back to system-ui, which
+ * needs no network. To get Inter/Barlow back, self-host the .woff2
+ * files in public/ and @font-face them from here.
+ */
+
+/* ============================================================
+   Dark instrument cluster.
+   The dashboard is drawn as a moulded binnacle floating on an
+   almost-black cabin backdrop: two deep gauge bowls, a centre
+   information column and a segmented SOC rail. Everything that
+   carries a value is near-white or cyan; the shell itself is
+   built only from soft greys so it never competes with a
+   reading.
+   ============================================================ */
+
+:root {
+  --cabin: #050807;         /* backdrop behind the binnacle */
+  --shell: #0d1211;         /* binnacle face */
+  --bowl: #141a1a;          /* gauge wells */
+  --bowl-2: #1b2222;
+  --line: #232c2c;
+  --line-soft: #1a2121;
+
+  --ink: #f2f6f6;           /* primary readouts */
+  --ink-2: #9fb0b0;         /* secondary text */
+  --ink-3: #6c7c7c;         /* labels */
+  --ink-4: #3f4b4b;         /* inert / dimmed text */
+
+  --cyan: #35c4e8;          /* the cluster accent */
+  --cyan-2: #6fe0f2;
+  --cyan-dim: #1d5f70;
+  --green: #46d17f;
+  --amber: #e2a33c;
+  --red: #e2565b;
+
+  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --cond: 'Arial Narrow', system-ui, sans-serif;
+
+  --r: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; min-height: 100%; overflow-x: hidden; }
+#root { min-height: 100dvh; }
+
+body {
+  background: var(--cabin);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button { font: inherit; color: inherit; }
+
+.app {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(6px, .9vh, 12px);
+  background:
+  radial-gradient(120% 90% at 50% 0%, #0a1010 0%, var(--cabin) 70%);
+}
+
+/* ---------------- binnacle shell ---------------- */
+
+/*
+* The outer moulding. Two stacked radii plus a hairline highlight
+* along the top edge read as a curved plastic hood under cabin light.
+*/
+.binnacle {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  position: relative;
+  background:
+  linear-gradient(180deg, #131918 0%, #090d0d 55%, #060909 100%);
+  border: 1px solid #1e2726;
+  box-shadow:
+  inset 0 1px 0 rgba(255, 255, 255, .05),
+  inset 0 -18px 40px rgba(0, 0, 0, .55),
+  0 18px 50px rgba(0, 0, 0, .6);
+}
+
+/* the inner face, inset from the moulding */
+.cluster {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(4px, .8vh, 10px);
+  padding: 0 clamp(10px, 2vw, 32px);
+  background:
+    radial-gradient(140% 120% at 50% -10%, #151c1b 0%, var(--shell) 45%, #070a0a 100%);
+  border: 1px solid #1b2322;
+  box-shadow: inset 0 2px 14px rgba(0, 0, 0, .7);
+}
+
+/* ---------------- top rail ---------------- */
+
+.cluster-top {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: clamp(8px, 1.2vh, 16px);
+}
+.cluster-title { color: var(--cyan); font-size: clamp(13px, 1.3vw, 18px); font-weight: 800; letter-spacing: .12em; }
+.cluster-title span { color: var(--ink-2); font-size: .62em; font-weight: 600; }
+.cluster-network { color: var(--ink-3); font-size: clamp(8px, .7vw, 10px); letter-spacing: .1em; }
+.cluster-actions { display: flex; align-items: center; gap: 14px; }
+.can-log-button, .can-log-close {
+  border: 1px solid var(--cyan-dim);
+  border-radius: 6px;
+  background: #101a1d;
+  color: var(--cyan-2);
+  padding: 7px 12px;
+  font: 700 11px var(--sans);
+  letter-spacing: .1em;
+  cursor: pointer;
+}
+.can-log-button:hover, .can-log-close:hover { border-color: var(--cyan); background: #17272b; }
+.can-log-button:focus-visible, .can-log-close:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+
+.can-log-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 4, 4, .86);
+}
+.can-log-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(1200px, 100%);
+  height: min(760px, 100%);
+  min-width: 0;
+  min-height: 0;
+  padding: clamp(14px, 2vw, 26px);
+  border: 1px solid #2b4549;
+  border-radius: 14px;
+  background: #0b1212;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .7);
+}
+.can-log-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.can-log-header h2 { margin: 0; color: var(--cyan); font-size: 20px; letter-spacing: .14em; }
+.can-log-header p { margin: 6px 0 0; color: var(--ink-2); }
+.can-log-status { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 18px 0 12px; color: var(--ink-2); font-size: 11px; letter-spacing: .06em; }
+.can-ready { color: var(--green); }
+.can-waiting, .can-error { color: var(--amber); }
+.can-log-table-wrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.can-log-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; color: var(--ink-2); font-size: 12px; }
+.can-log-filter input { min-width: 0; max-width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #0f1717; color: var(--ink); font: inherit; }
+.can-log-filter input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.can-log-filter input[aria-invalid="true"] { border-color: #ff6b6b; }
+.can-log-filter button:disabled { opacity: .5; cursor: default; }
+.can-log-table { width: 100%; border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
+.can-log-table caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.can-log-table th { position: sticky; top: 0; z-index: 1; padding: 11px 12px; background: #182223; color: var(--cyan-2); font-size: 10px; letter-spacing: .1em; white-space: nowrap; }
+.can-log-table td { padding: 10px 12px; border-top: 1px solid var(--line); color: var(--ink-2); white-space: nowrap; }
+.can-log-table tbody tr:nth-child(even) { background: #0f1717; }
+.can-log-table .can-bytes { color: var(--ink); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .06em; }
+.can-log-table .can-log-empty { text-align: center; padding: 48px 12px; color: var(--ink-3); }
+
+@media (max-width: 520px) {
+  .cluster-actions { gap: 7px; }
+  .cluster-network { display: none; }
+  .can-log-button { padding: 6px 8px; }
+}
+
+/* ---------------- drive mode switch ---------------- */
+
+/*
+ * Stacked rectangular plates, as on the reference cluster: the
+ * selected mode is outlined in cyan rather than filled, so it stays
+ * legible without pulling focus from the gauges.
+ */
+.mode-switch {
+  display: flex;
+  align-items: center;
+  gap: clamp(4px, .6vw, 8px);
+}
+.mode-btn {
+  border: 1px solid #2a3433;
+  background: #0f1615;
+  border-radius: 5px;
+  padding: clamp(4px, .7vh, 8px) clamp(10px, 1.2vw, 20px);
+  font: 600 clamp(9px, .8vw, 12px)/1 var(--sans);
+  letter-spacing: .14em;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color .2s, border-color .2s, background .2s, box-shadow .2s;
+}
+.mode-btn:hover {
+  color: var(--ink);
+  border-color: #3a4746;
+}
+.mode-btn.active {
+  color: var(--ink);
+  border-color: var(--cyan);
+  background: #101a1d;
+  box-shadow:
+    inset 0 0 14px rgba(53, 196, 232, .1),
+    0 0 10px rgba(53, 196, 232, .12);
+}
+
+/* ---------------- instrument row ---------------- */
+
+.cluster-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 1.12fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(4px, .9vw, 16px);
+}
+
+/* ---------------- gauges ---------------- */
+
+.gauge {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  place-items: center;
+}
+
+/* keep the dial square and bound by the shorter axis */
+.gauge-svg {
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+  aspect-ratio: 1;
+  overflow: visible;
+}
+
+/* the recessed well the dial sits in */
+.gauge-bowl {
+  fill: black;
+  stroke: #1e2726;
+  stroke-width: 1;
+  filter: drop-shadow(0 6px 13px rgba(22, 207, 240, 0.288));
+}
+
+.gauge-track {
+  fill: none;
+  stroke: #2e3030;
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+.gauge-fill {
+  fill: none;
+  stroke: var(--cyan);
+  stroke-width: 9;
+  stroke-linecap: round;
+  transition: stroke-dasharray .5s cubic-bezier(.22, .8, .3, 1);
+  filter: drop-shadow(0  2px 10px rgba(84, 210, 241, 0.5));
+}
+
+/* the machined tick ring inside the arc */
+.gauge-tick {
+  stroke: #5e5f5f;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  transition: stroke .3s;
+}
+.gauge-tick.major { stroke: #4a5857; stroke-width: 2.4; }
+.gauge-tick.on { stroke: #03f0e4; }
+.gauge-tick.major.on { stroke: var(--ink-2); }
+
+.gauge-core {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.gauge-value {
+  font: 300 clamp(40px, 5.4vw, 92px)/.84 var(--sans);
+  letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+  color: #ffffff;
+}
+.gauge-unit {
+  margin-top: clamp(3px, .6vh, 9px);
+  font: 400 clamp(10px, 1.05vw, 17px) var(--sans);
+  color: var(--ink-2);
+}
+.gauge-label {
+  margin-top: clamp(2px, .5vh, 6px);
+  font: 500 clamp(9px, .9vw, 14px) var(--sans);
+  letter-spacing: .1em;
+  color: var(--cyan);
+}
+
+
+/* ---------------- battery rail ---------------- */
+
+.batt-rail {
+  /* sits in the top-right corner of the instrument row, not centred on it */
+  right:70px;
+  top:20px;
+  position:fixed;
+  height: 30px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: clamp(3px, .6vh, 8px);
+  padding: clamp(2px, .5vh, 6px) clamp(2px, .4vw, 8px) 0;
+}
+
+.rail-cap,
+.rail-sub {
+  font: 600 clamp(7px, .62vw, 10px) var(--sans);
+  letter-spacing: .16em;
+  color: white;
+}
+
+/*
+ * The cell lies on its side: the shell runs left-to-right and the
+ * terminal nub sits on its right-hand end.
+ */
+.rail-body {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  height: 100px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* the little terminal cap on the end of the cell */
+.rail-nub {
+  width: clamp(3px, .4vw, 5px);
+  height: clamp(10px, 1vh, 16px);
+  border-radius: 0 2px 2px 0;
+  background: #2c3736;
+  order: 2;
+}
+
+.rail-shell {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: clamp(2px, .35vw, 4px);
+  width: 200px;
+  height: 50px;
+  padding: clamp(3px, .4vw, 5px);
+  border-radius: 5px;
+  border: 1px solid #2c3736;
+  background: #0d1312;
+  order: 1;
+}
+
+.rail-cell {
+  flex: 1 1 0;
+  border-radius: 2px;
+  background: #1a2221;
+  transition: background .45s ease, box-shadow .45s ease;
+}
+.level-good .rail-cell.lit {
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(70, 209, 127, .35);
+}
+.level-mid .rail-cell.lit {
+  background: var(--amber);
+  box-shadow: 0 0 8px rgba(226, 163, 60, .35);
+}
+.level-low .rail-cell.lit {
+  background: var(--red);
+  box-shadow: 0 0 8px rgba(226, 86, 91, .35);
+  animation: lowBlink 1.3s ease-in-out infinite;
+}
+@keyframes lowBlink { 50% { opacity: .45; } }
+
+.batt-rail.charging .rail-cell.lit {
+  animation: cellFlow 1.5s ease-in-out infinite;
+}
+@keyframes cellFlow { 50% { opacity: .6; } }
+
+.rail-pct {
+  font: 600 clamp(11px, 1.05vw, 16px) var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+.level-good .rail-pct { color: var(--green); }
+.level-mid  .rail-pct { color: var(--amber); }
+.level-low  .rail-pct { color: var(--red); }
+
+/* ---------------- centre column ---------------- */
+
+.cluster-mid {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 clamp(2px, .4vw, 8px);
+}
+
+/* ---------------- forward camera ---------------- */
+
+.mapview{
+  position: relative;
+  margin-top:30px;
+  align-self: center;
+  width: fit-content;
+  padding: 10px 20px;
+  border-radius: 8px;
+  height: fit-content;
+  font-size: 18px;
+  background: black;
+  border:rgb(145, 202, 235) 1px solid;
+}
+.mapview:hover{
+  background: rgb(145, 202, 235);
+  color: black;
+  cursor: pointer;
+}
+
+.camera{
+  width: 100%;
+  max-width: 480px;
+  min-height: 0;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(8px, 1.5vh, 20px);
+  padding: clamp(12px, 1.5vw, 24px);
+  background: #0b1111;
+  border: 1px solid var(--line);
+}
+
+.camera-heading, .camera-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.camera-label, .camera-footer {
+  color: var(--ink-3);
+  font-size: clamp(9px, .75vw, 11px);
+  font-weight: 700;
+  letter-spacing: .1em;
+}
+.camera-position {
+  color: var(--cyan-2);
+  font-size: clamp(11px, 1.1vw, 16px);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.camera-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(8px, 1vw, 16px);
+}
+.camera-stats > div { display: grid; gap: 3px; }
+.camera-stats span { color: var(--ink-3); font-size: clamp(9px, .8vw, 11px); }
+.camera-stats strong { color: var(--ink); font-size: clamp(14px, 1.5vw, 22px); font-variant-numeric: tabular-nums; }
+
+.stecon{
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-top: 20px;
+  gap: 20px;
+  font-size: 23px;
+  letter-spacing: 1px;
+  flex-direction: column;
+  
+}
+.stegreen{
+  color: rgb(70, 209, 127);
+  text-shadow: 0 0 8px rgba(16, 197, 91, 0.35);
+}
+
+/* ---------------- lower deck ---------------- */
+
+.deck {
+  flex: 0 0 auto;
+  height: clamp(120px, 22vh, 210px);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(6px, .9vw, 14px);
+}
+
+.card {
+  background: linear-gradient(180deg, #0e1413 0%, #0a0f0e 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: clamp(6px, .9vh, 12px) clamp(8px, .9vw, 15px);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+}
+
+.card h2 {
+  margin: 0 0 7px;
+  display: flex; align-items: center; gap: 6px;
+  font: 600 clamp(8px, .8vw, 11px) var(--sans);
+  letter-spacing: .16em;
+  color: var(--ink-3);
+  flex: 0 0 auto;
+}
+.card h2 .icon { color: var(--ink-3); }
+
+.link-pill {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font: 600 10px var(--sans);
+  border: 1px solid transparent;
+}
+.link-pill.ok {
+  background: rgba(70, 209, 127, .1);
+  color: var(--green);
+  border-color: rgba(70, 209, 127, .35);
+}
+.link-pill.warn {
+  background: rgba(226, 163, 60, .1);
+  color: var(--amber);
+  border-color: rgba(226, 163, 60, .35);
+}
+.pulse-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+  animation: pulse 1.6s ease-out infinite;
+}
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+  70%  { box-shadow: 0 0 0 6px transparent; opacity: .75; }
+  100% { box-shadow: 0 0 0 0 transparent; opacity: 1; }
+}
+
+/* ---------------- thermal ---------------- */
+
+.temp-list {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  gap: 4px;
+  min-height: 0;
+}
+.temp-row {
+  display: grid;
+  grid-template-columns: 62px 1fr 38px;
+  align-items: center;
+  gap: 8px;
+}
+.temp-name {
+  font: 400 11px var(--sans);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.temp-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #1a2221;
+  overflow: hidden;
+}
+.temp-fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width .9s cubic-bezier(.3, .8, .3, 1), background .4s;
+}
+.temp-fill.cool { background: var(--cyan); box-shadow: 0 0 8px rgba(53, 196, 232, .35); }
+.temp-fill.warm { background: var(--amber); box-shadow: 0 0 8px rgba(226, 163, 60, .35); }
+.temp-fill.hot  {
+  background: var(--red);
+  box-shadow: 0 0 8px rgba(226, 86, 91, .4);
+  animation: hotPulse 1.1s ease-in-out infinite;
+}
+@keyframes hotPulse { 50% { opacity: .5; } }
+
+.temp-num {
+  text-align: right;
+  font: 600 clamp(12px, 1.2vw, 16px) var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+.temp-num.cool { color: var(--ink); }
+.temp-num.warm { color: var(--amber); }
+.temp-num.hot  { color: var(--red); }
+
+/* ---------------- map ---------------- */
+
+.mapcard { min-width: 0; }
+
+/*
+ * The map face is itself the button. Every child is click-through so
+ * the press always lands on the button, and Leaflet never sees it -
+ * the map was already non-interactive (dragging and zoom are off).
+ */
+.map-face {
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #0a0f0e;
+  cursor: pointer;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color .2s, box-shadow .2s;
+}
+.map-face > * { pointer-events: none; }
+.map-face:hover {
+  border-color: rgba(53, 196, 232, .5);
+  box-shadow: 0 0 0 1px rgba(53, 196, 232, .18);
+}
+.map-face:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.map-zoom-hint {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  z-index: 950;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(10, 15, 14, .88);
+  font: 600 clamp(7px, .7vw, 10px) var(--sans);
+  letter-spacing: .14em;
+  color: var(--ink-2);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .2s;
+}
+.map-face:hover .map-zoom-hint,
+.mapcard.expanded .map-zoom-hint { opacity: 1; }
+
+/* ---------------- fullscreen map ---------------- */
+
+/*
+ * Lifting the card out of the deck rather than mounting a second map
+ * keeps the single Leaflet instance - and its trail - intact. The
+ * card's own ResizeObserver calls invalidateSize once it resizes.
+ */
+.mapcard.expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  border-radius: 0;
+  border: 0;
+  padding: clamp(10px, 1.6vh, 20px) clamp(12px, 1.8vw, 26px);
+  background: var(--cabin);
+  animation: mapIn .22s ease-out;
+}
+.mapcard.expanded .map-face {
+  border-radius: 12px;
+}
+.mapcard.expanded h2 {
+  margin-bottom: clamp(8px, 1.2vh, 14px);
+  font-size: clamp(10px, 1vw, 13px);
+}
+
+@keyframes mapIn {
+  from { opacity: 0; transform: scale(.985); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.map-canvas {
+  position: absolute;
+  inset: 0;
+  /*
+   * The offline tiles are a light street style; darkening them here
+   * keeps the map from glaring inside a night cluster without needing
+   * a second tile set on the board's flash.
+   */
+  filter: invert(1) hue-rotate(180deg) brightness(.86) contrast(1.05) saturate(.7);
+}
+
+/* Leaflet paints its own chrome; tone it down to match the cluster. */
+.map-canvas.leaflet-container {
+  background: #0a0f0e;
+  font-family: var(--sans);
+}
+.map-canvas .leaflet-control-attribution {
+  font-size: 8px;
+  background: rgba(255, 255, 255, .72);
+  color: #33403f;
+}
+
+.map-speed {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 950;
+  pointer-events: none;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: rgba(10, 15, 14, .88);
+  border: 1px solid var(--line);
+  font: 700 clamp(13px, 1.4vw, 18px) var(--cond);
+  color: var(--ink);
+  line-height: 1;
+}
+.map-speed i {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--ink-3);
+  margin-left: 3px;
+}
+
+.map-dist {
+  margin-left: auto;
+  font: 600 10px var(--sans);
+  color: var(--ink-2);
+}
+
+/* Shown while the module has no usable fix. */
+.map-nofix {
+  position: absolute;
+  inset: 0;
+  z-index: 940;
+  pointer-events: none;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 9, 9, .78);
+  font: 600 clamp(9px, 1vw, 12px) var(--sans);
+  letter-spacing: .16em;
+  color: var(--ink-3);
+}
+
+/* ---------------- gps status pill ---------------- */
+
+.gps-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font: 600 10px var(--sans);
+  letter-spacing: .06em;
+}
+.gps-pill.ok {
+  background: rgba(70, 209, 127, .1);
+  color: var(--green);
+  border-color: rgba(70, 209, 127, .35);
+}
+.gps-pill.stale {
+  background: rgba(226, 86, 91, .1);
+  color: var(--red);
+  border-color: rgba(226, 86, 91, .35);
+}
+.gps-pill.searching {
+  background: rgba(226, 163, 60, .1);
+  color: var(--amber);
+  border-color: rgba(226, 163, 60, .35);
+}
+
+.gps-pill .pulse-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: gps-pulse 1.6s ease-in-out infinite;
+}
+.gps-pill.ok .pulse-dot { animation-duration: 2.4s; }
+
+@keyframes gps-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .25; }
+}
+
+/* ---------------- vehicle marker ---------------- */
+
+/*
+ * The marker sits above the inverted tile layer, so its colours are
+ * pre-compensated: the filter flips them back to cyan on screen.
+ */
+.map-marker { background: none; border: 0; }
+
+.map-marker-ping {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(200, 90, 30, .3);
+  animation: marker-ping 2s ease-out infinite;
+}
+
+.map-marker-arrow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  /* Triangle points north at 0deg; JS rotates it to the heading. */
+  margin: -9px 0 0 -6px;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-bottom: 15px solid #c8571b;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .5));
+  transform-origin: 50% 60%;
+  transition: transform .35s ease-out;
+}
+
+@keyframes marker-ping {
+  0%   { transform: scale(.5); opacity: .9; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+
+/* ---------------- narrow / short screens ---------------- */
+
+@media (max-width: 1100px) {
+  .cluster-body {
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 1.1fr) minmax(0, 1fr);
+    gap: clamp(3px, .6vw, 10px);
+  }
+}
+
+@media (max-width: 860px) {
+  /* Put the information panel below the gauges on narrow displays. */
+  .cluster-body {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "left right"
+      "mid  mid";
+    grid-template-rows: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+  .cluster-body > .gauge:first-child { grid-area: left; }
+  .cluster-mid { grid-area: mid; }
+  .cluster-body > .gauge:nth-of-type(2) { grid-area: right; }
+  .cluster-mid { justify-content: flex-start; }
+  .camera { max-width: none; }
+  .camera-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .deck { height: clamp(100px, 19vh, 180px); }
+}
+
+@media (max-width: 520px) {
+  .camera-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .camera-footer { display: none; }
+  .mapview { margin-top: 4px; }
+}
+
+@media (max-width: 860px), (max-height: 560px) {
+  .app { height: auto; min-height: 100dvh; }
+  .binnacle { flex: none; min-height: 0; }
+  .cluster { height: auto; }
+  .cluster-body { min-height: 0; }
+  .gauge { height: clamp(150px, 34vw, 270px); }
+}
+
+@media (max-height: 640px) {
+  .gauge-value { font-size: clamp(32px, 4.4vw, 62px); }
+  .deck { height: clamp(96px, 18vh, 150px); }
+  .cam-feed { min-height: clamp(48px, 11vh, 96px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+  .map-marker-ping,
+  .gps-pill .pulse-dot { animation: none; }
+  .map-marker-arrow { transition: none; }
+}
+
+/* CAN state panel beneath the original cluster and offline map. */
+.app { height: auto; min-height: 100dvh; }
+.binnacle { flex: 0 0 auto; height: auto; min-height: 0; }
+.cluster { height: min(65vh, 680px); min-height: 390px; }
+.vehicle-panel { flex: 0 0 auto; margin: 0 12px 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: #0d1413; }
+.vehicle-panel header { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.vehicle-panel h2, .vehicle-group h3 { margin: 0; color: var(--cyan); letter-spacing: .08em; font-size: 13px; }
+.vehicle-panel header span, .vehicle-panel p { color: var(--ink-3); font-size: 11px; }
+.node-health { display: flex; flex-wrap: wrap; gap: 7px; margin: 14px 0; }
+.node-health span { border-radius: 20px; border: 1px solid; padding: 5px 9px; font-size: 10px; font-weight: 700; }
+.node-health .alive { color: var(--green); border-color: var(--green); }
+.node-health .offline { color: var(--red); border-color: var(--red); }
+.node-health .unknown { color: var(--ink-2); border-color: var(--ink-3); }
+.node-health .fault { color: var(--amber); border-color: var(--amber); }
+.vehicle-groups { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.vehicle-group { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: #101a19; }
+.vehicle-group h3 { margin-bottom: 8px; }
+.vehicle-group dl { margin: 0; }
+.vehicle-group dl div { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line-soft); }
+.vehicle-group dt { color: var(--ink-3); text-transform: capitalize; }
+.vehicle-group dd { margin: 0; font-weight: 700; text-align: right; }
+@media (max-width: 900px) { .vehicle-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .vehicle-groups { grid-template-columns: 1fr; } .vehicle-panel { flex: 0 0 auto; margin: 0 6px 10px; } }
+
+```
