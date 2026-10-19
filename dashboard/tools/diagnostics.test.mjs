@@ -54,3 +54,15 @@ test('idle voltage is subtracted once and clamps to zero', () => {
   assert.equal(throttlePercent(4095),100)
   assert.ok(Math.abs(throttleVoltage(2000)-0.9117216)<0.000001)
 })
+
+test('remote frames are tagged as host commands; handoff failures and physical sensors remain distinct',()=>{
+  const tx=decodeFrame({id:0x301,dlc:2,data:[255,3],tx:true})
+  assert.equal(tx.node,5);assert.equal(tx.kind,'Remote throttle command')
+  assert.match(frame(0x121,[2,100,0,0xD1,1,0,0,0]).text,/ZERO LOCK/)
+  assert.equal(frame(0x122,[2,4,0,0xD1,1,0,0,0]).issue,true)
+  const model=diagnosticsModel({vehicle:{at:1000,data:{canReady:true,acceleratorAdc:3000,remoteDrive:{active:true,adc:3000,pedalAdc:0,switchMask:4,pedalGate:1,switchGate:2,reason:'HANDOFF LOST'}}}},1000)
+  assert.equal(model.nodes[0].sensors[0].value,'0 / 4095')
+  assert.equal(model.nodes[2].sensors[2].value,'ON')
+  assert.ok(model.faults.some(f=>f.key==='drive-gate-3'))
+  assert.ok(model.faults.some(f=>f.key==='remote-drive'))
+})

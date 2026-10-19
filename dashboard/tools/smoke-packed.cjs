@@ -22,6 +22,13 @@ let frames = [
 const calls = {}, fail = new Set()
 const steering = {ready:true, token:99, direction:0, pwm:0, reason:0, ageMs:10}
 const steeringCommands=[]
+const drive={ready:true,token:100,held:false,adc:0,reverse:false,canShift:true,message:''}
+const driveCommands=[]
+let lastDrive=0,driveStopped=0
+function driveExpire() {
+  if(drive.held && Date.now()-lastDrive>=350){drive.held=false;drive.adc=0;++drive.token;driveStopped=Date.now()}
+  drive.canShift=!drive.held && Date.now()-driveStopped>=1000
+}
 let lastMotion=0
 function steeringExpire() {
   if(steering.direction && Date.now()-lastMotion>=350){steering.direction=0;steering.pwm=0;++steering.token}
@@ -30,6 +37,23 @@ const mime = { '.html':'text/html', '.js':'application/javascript', '.css':'text
 const server = http.createServer((req,res) => {
   const pathname = new URL(req.url,'http://localhost').pathname
   calls[pathname] = (calls[pathname] || 0)+1
+  if(pathname==='/api/drive') {
+    driveExpire()
+    if(req.method==='POST') {
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        const params=new URLSearchParams(body),action=params.get('action')
+        driveCommands.push({action,percent:Number(params.get('percent')),header:req.headers['x-srt-control']})
+        let status=200
+        if(fail.has(pathname))status=503
+        else if(action==='stop'){if(drive.held)driveStopped=Date.now();drive.held=false;drive.adc=0;++drive.token}
+        else if(Number(params.get('token'))!==drive.token)status=409
+        else if(action==='reverse'){if(!drive.canShift)status=409;else {drive.reverse=params.get('reverse')==='1';++drive.token}}
+        else {drive.held=true;drive.adc=Math.floor(Number(params.get('percent'))*4095/100);lastDrive=Date.now()}
+        driveExpire();res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(drive))
+      });return
+    }
+    res.writeHead(fail.has(pathname)?503:200,{'Content-Type':'application/json'});res.end(JSON.stringify(drive));return
+  }
   if(pathname==='/api/steering') {
     steeringExpire()
     if(req.method==='POST') {
@@ -86,7 +110,7 @@ const server = http.createServer((req,res) => {
     await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0)
     assert.match(await page.evaluate(()=>document.activeElement.textContent),/MAP/)
     assert.equal(calls['/api/steering'] || 0,0)
-    await page.getByRole('button',{name:'STEER'}).click()
+    await page.getByRole('button',{name:'CONTROL'}).click()
     const left=page.getByRole('button',{name:'Hold left to steer'}),right=page.getByRole('button',{name:'Hold right to steer'})
     await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
     await page.setViewportSize({width:390,height:844})
@@ -125,6 +149,53 @@ const server = http.createServer((req,res) => {
     box=await right.boundingBox()
     event=waitCommand('stop');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point,{x:box.x+box.width/2,y:box.y+box.height/2,id:2}]});await event
     await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});assert.equal(steering.direction,0)
+    const throttle=page.getByRole('button',{name:'Hold throttle to move'}),reverse=page.getByRole('button',{name:/REVERSE/}),level=page.getByLabel('ADC LEVEL')
+    assert.equal(await throttle.isDisabled(),true,'Throttle starts at zero')
+    await level.focus();for(let n=0;n<5;n++)await page.keyboard.press('ArrowRight')
+    assert.equal(await level.inputValue(),'25')
+    await page.waitForFunction(()=>!document.querySelector('.throttle-hold').disabled)
+    const waitDrive=action=>page.waitForResponse(r=>r.url().endsWith('/api/drive')&&r.request().method()==='POST'&&new URLSearchParams(r.request().postData()).get('action')===action)
+    event=waitDrive('throttle');await press(throttle);await event;assert.equal(drive.adc,1023)
+    assert.equal(await reverse.isDisabled(),true);assert.equal(await level.isDisabled(),true)
+    event=waitDrive('stop');await page.mouse.up();await event;assert.equal(drive.adc,0)
+    assert.equal(await reverse.isDisabled(),true,'Reverse waits after zero command')
+    await page.waitForFunction(()=>!document.querySelector('.reverse-select').disabled)
+    event=waitDrive('reverse');await reverse.click();await event;assert.equal(drive.reverse,true)
+    await page.waitForFunction(()=>!document.querySelector('.throttle-hold').disabled)
+    // Actual two-finger input: independent steering and throttle holds.
+    const lb=await left.boundingBox(),tb=await throttle.boundingBox()
+    const lp={x:lb.x+lb.width/2,y:lb.y+lb.height/2,id:11},tp={x:tb.x+tb.width/2,y:tb.y+tb.height/2,id:12}
+    event=waitCommand('left');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[lp]});await event
+    event=waitDrive('throttle');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[lp,tp]});await event
+    assert.equal(steering.direction,1);assert.equal(drive.adc,1023)
+    event=waitDrive('stop');await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[tp]});await event
+    assert.equal(drive.adc,0);assert.equal(steering.direction,1,'Releasing throttle preserves steering hold')
+    event=waitCommand('stop');await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await event
+    await page.waitForFunction(()=>!document.querySelector('.throttle-hold').disabled)
+    // A third finger on STOP cancels both independent held controls.
+    event=waitCommand('left');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[lp]});await event
+    event=waitDrive('throttle');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[lp,tp]});await event
+    const sb=await page.locator('.remote-stop').boundingBox()
+    const stoppedSteer=waitCommand('stop'),stoppedDrive=waitDrive('stop')
+    await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[lp,tp,{id:13,x:sb.x+sb.width/2,y:sb.y+sb.height/2}]})
+    await Promise.all([stoppedSteer,stoppedDrive]);assert.equal(steering.direction,0);assert.equal(drive.adc,0)
+    await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})
+    await page.waitForFunction(()=>!document.querySelector('.throttle-hold').disabled)
+    event=waitDrive('throttle');await press(throttle);await event
+    fail.add('/api/drive');await waitDrive('stop');await page.mouse.up()
+    const failureCount=driveCommands.length;fail.delete('/api/drive')
+    await page.waitForFunction(()=>!document.querySelector('.throttle-hold').disabled)
+    assert.equal(driveCommands.slice(failureCount).filter(c=>c.action==='throttle').length,0)
+    event=waitDrive('throttle');await press(throttle);await event
+    event=waitDrive('stop');await page.evaluate(()=>window.dispatchEvent(new Event('blur')));await event;await page.mouse.up()
+    assert.equal(drive.adc,0)
+    assert.ok(driveCommands.filter(c=>c.action==='throttle').every(c=>c.header==='1'&&c.percent===25))
+    for(const [width,height] of [[320,700],[390,844],[800,480]]) {
+      await page.setViewportSize({width,height})
+      assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))
+      assert.ok(await page.locator('.remote-stop').evaluate(el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight}),'STOP remains visible')
+    }
+    await page.setViewportSize({width:390,height:844});await page.screenshot({animations:'disabled',path:'/tmp/srt-control-mobile.png'})
     await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0)
     await page.setViewportSize({width:1280,height:800})
     vehicle.pitchDeg=null;vehicle.pitchValid=false;vehicle.acceleratorPct=null
@@ -178,6 +249,7 @@ const server = http.createServer((req,res) => {
     await page.goto(base+'/status');await page.getByText('CONNECTED',{exact:true}).waitFor()
     const reduced=await browser.newPage({reducedMotion:'reduce'});await reduced.goto(base);assert.equal(await reduced.locator('.launch').count(),0)
     assert.deepEqual(errors,[])
+    console.log('Packed drive passed: adjustable zero-default level, reverse lock, simultaneous two-finger input, shared STOP, release and recovery')
     console.log('Packed steering passed: pointer/keyboard release, drag-away, blur, reconnect, touch cancel and conflicting multi-touch')
     console.log('Packed UI passed: routes, layouts, lazy map, IMU freeze, unknown feedback, filters, pause, copy/export, API failures, recovery, reduced motion')
   } finally {await browser.close();server.close()}

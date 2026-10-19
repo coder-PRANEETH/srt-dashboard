@@ -19,21 +19,25 @@
         "dashboard/src/SteeringPanel.jsx",
         "dashboard/src/steeringClient.js",
         "SteeringControl.h",
-        "ThrottleCalibration.h"
+        "ThrottleCalibration.h",
+        "RemoteDrive.h",
+        "dashboard/src/driveClient.js"
       ],
       "fingerprints": {
-        ".superdesign/design-system.md": "a5dce172602deb665d2821fb842e8cf05fab6017dc008fca9b1df45da2a096e2",
+        ".superdesign/design-system.md": "a33b1eee224c503eddcf883a9c973acaf8c896b3eee6191882f5f222563e5954",
         "dashboard/src/index.css": "7815137706b78bdddebd2daf2086d20b7b8272f1e3136341e0f9da7251098161",
         "dashboard/src/App.jsx": "de7fddc5ade53159a7615aa41e45ff8513207b0fa3f07b68f96865bb6df7c8de",
-        "dashboard/src/App.css": "7364b27cecac5d03f4945152d4ebed79eb60be2cb3f21cff131f12ce28da7adf",
+        "dashboard/src/App.css": "8c902e6e45986b9a90e023de3a66980840c93f5daf6f924982e1ce6893a96a50",
         "dashboard/src/useTelemetry.js": "38c4b3fc20536f2a1a3c9d320364a2f6f7b923a7b739fd7b38a5ac1199020825",
-        "dashboard/src/diagnostics.js": "8d198e9483d5e4bc0ea7a6ec408d8b6de9cd19055c7855cf8b59e14aa2ba9c72",
-        "dashboard/src/HomePage.jsx": "45f9a02b853124a6b9aaa914817df47c8d37bbd718135a7537b9446b96b31a42",
+        "dashboard/src/diagnostics.js": "25bad279a92fb9a52f4dc065bf6b98cb17ed57b9b17e307ec8f6c457b330019a",
+        "dashboard/src/HomePage.jsx": "a53fe386fcf20a35efd768be7a4a48d013e0bb7b248b9ed37ffd78c3be3ad54d",
         "dashboard/src/MapView.jsx": "d75a02c4ada471713dacf0d6c3413ed60994643c4c3c4bf9894d1234b5ea0c47",
-        "dashboard/src/SteeringPanel.jsx": "83282b0f5048abef1bb8a06a5a8c9778535ccb1a8a5dfe775ae81df2cf8a1e21",
+        "dashboard/src/SteeringPanel.jsx": "5170d1917c3439891e270ea45874d9b5e07124b824950f9ed67180ec6ea8a6bd",
         "dashboard/src/steeringClient.js": "76c8179b0ddcf87d06aa6092b16103b8735ba28e4753658553e075c7d2e387f5",
         "SteeringControl.h": "c7947b0c8722c87b296b040ed54b8bff8746d90e06fd9fde9c1b93e84367f8a2",
-        "ThrottleCalibration.h": "8ed4fdb0324d07855322c1781f793f779e4a3226e57b97e00bfc3fef7f6616f5"
+        "ThrottleCalibration.h": "8ed4fdb0324d07855322c1781f793f779e4a3226e57b97e00bfc3fef7f6616f5",
+        "RemoteDrive.h": "a9b5cb849719be1fe233c679779991ad2c56bdb11a3fe7b2668356e1c65654f0",
+        "dashboard/src/driveClient.js": "734bfcb93b639f212f99e81bb9d3f82a92e66e00fc5c1f31939bf85d5b263899"
       },
       "components": [],
       "drafts": {
@@ -64,20 +68,24 @@
         "node5_dash.ino",
         "node4_tcu.ino",
         "SteeringControl.h",
-        "ThrottleCalibration.h"
+        "ThrottleCalibration.h",
+        "RemoteDrive.h",
+        "dashboard/src/driveClient.js"
       ],
       "fingerprints": {
-        ".superdesign/design-system.md": "a5dce172602deb665d2821fb842e8cf05fab6017dc008fca9b1df45da2a096e2",
+        ".superdesign/design-system.md": "a33b1eee224c503eddcf883a9c973acaf8c896b3eee6191882f5f222563e5954",
         "dashboard/src/index.css": "7815137706b78bdddebd2daf2086d20b7b8272f1e3136341e0f9da7251098161",
         "dashboard/src/App.jsx": "de7fddc5ade53159a7615aa41e45ff8513207b0fa3f07b68f96865bb6df7c8de",
-        "dashboard/src/App.css": "7364b27cecac5d03f4945152d4ebed79eb60be2cb3f21cff131f12ce28da7adf",
+        "dashboard/src/App.css": "8c902e6e45986b9a90e023de3a66980840c93f5daf6f924982e1ce6893a96a50",
         "dashboard/src/useTelemetry.js": "38c4b3fc20536f2a1a3c9d320364a2f6f7b923a7b739fd7b38a5ac1199020825",
-        "dashboard/src/diagnostics.js": "8d198e9483d5e4bc0ea7a6ec408d8b6de9cd19055c7855cf8b59e14aa2ba9c72",
-        "dashboard/src/StatusPage.jsx": "6f2718002980b0de35ed24cacf82b50a14943d5cfb26261cba599ed8e03f6c8d",
-        "node5_dash.ino": "d912f5d0a35fb91db82b079318edb8f110d9f6597a8ea44becde9e1d869cc2ca",
+        "dashboard/src/diagnostics.js": "25bad279a92fb9a52f4dc065bf6b98cb17ed57b9b17e307ec8f6c457b330019a",
+        "dashboard/src/StatusPage.jsx": "db127f2c39f56a70df312096da8071d1dfce2ed2d556b668c1e2a44fbf7fc1bf",
+        "node5_dash.ino": "44106b39a61837dadb90e1fbf7dab450f190f1bc216ef6e841bae589764e5a7d",
         "node4_tcu.ino": "f499612fd6e78ea0145f970aa6937650e186a0af407dabdf2edf0dcf8b32533f",
         "SteeringControl.h": "c7947b0c8722c87b296b040ed54b8bff8746d90e06fd9fde9c1b93e84367f8a2",
-        "ThrottleCalibration.h": "8ed4fdb0324d07855322c1781f793f779e4a3226e57b97e00bfc3fef7f6616f5"
+        "ThrottleCalibration.h": "8ed4fdb0324d07855322c1781f793f779e4a3226e57b97e00bfc3fef7f6616f5",
+        "RemoteDrive.h": "a9b5cb849719be1fe233c679779991ad2c56bdb11a3fe7b2668356e1c65654f0",
+        "dashboard/src/driveClient.js": "734bfcb93b639f212f99e81bb9d3f82a92e66e00fc5c1f31939bf85d5b263899"
       },
       "components": [],
       "drafts": {

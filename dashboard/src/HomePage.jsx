@@ -57,7 +57,7 @@ export default function HomePage() {
         <div><div className="caps muted">TRIP</div><div className="rail-value mono">{track.trip.toFixed(2)}<small>km</small></div></div>
         <div><div className="caps muted">Heading</div><div className="rail-value mono">{fix ? display(track.heading) : '—'}<small>°</small></div></div>
         <div><div className="caps muted">SATELLITES</div><div className="rail-value mono">{fix ? display(gps.sats) : '—'}</div></div>
-        <div className="drive-actions"><button className="button" onClick={() => setSteeringOpen(true)}>STEER ↔</button><button className="button primary" onClick={() => setMapOpen(true)}><svg className="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2V5ZM9 3v16M15 5v16" /></svg>MAP ↗</button></div>
+        <div className="drive-actions"><button className="button" onClick={() => setSteeringOpen(true)}>CONTROL ↔</button><button className="button primary" onClick={() => setMapOpen(true)}><svg className="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2V5ZM9 3v16M15 5v16" /></svg>MAP ↗</button></div>
       </div></main>
     </div>
     {intro && <button className="launch" aria-label="Skip SRT opening animation" onClick={() => setIntro(false)} autoFocus><span className="wordmark">SRT</span><span className="launch-line" /></button>}
