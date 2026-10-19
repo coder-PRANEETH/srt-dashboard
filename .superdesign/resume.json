@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "/": {
+      "targetKind": "existing-ui",
+      "projectId": "1f9fec98-cdb4-4b04-a47e-9abde3f93bba",
+      "baselineDraftId": "30d505cc-6133-4cd4-9d73-92eb1f5f8206",
+      "activeDraftId": "30d505cc-6133-4cd4-9d73-92eb1f5f8206",
+      "designSystemPath": ".superdesign/design-system.md",
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        "dashboard/src/index.css",
+        "dashboard/src/App.jsx:234:479",
+        "dashboard/src/App.jsx:697:777",
+        "dashboard/src/App.jsx:881:970",
+        "dashboard/src/App.jsx:1357:1450",
+        "dashboard/src/App.css:1:190",
+        "dashboard/src/App.css:220:320",
+        "dashboard/src/App.css:408:548",
+        "dashboard/src/App.css:600:915"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "59175602998b8f8f3c6a0819340c5c862b65768dbfc741bd944057b763a1aa49",
+        "dashboard/src/index.css": "d11dc7d772e6817d1ddfc06cccdef0f8b32d614b70148c334affa16ce3787320",
+        "dashboard/src/App.jsx": "eaa3bafe06f6894a4e23a9bde807f80d9dea17d12cef86b0ed09dd6e99db93c4",
+        "dashboard/src/App.css": "5329ead13db5adc1853b774fcf178706ee09986548b3b9f3ccb7171fb1847f09"
+      },
+      "components": [],
+      "drafts": {
+        "30d505cc-6133-4cd4-9d73-92eb1f5f8206": {
+          "title": "SRT Telemetry Baseline Reproduction",
+          "visualDirection": "Current cyan twin-gauge instrument cluster"
+        }
+      },
+      "updatedAt": "2026-10-19T16:05:07.999982+00:00"
+    }
+  }
+}
