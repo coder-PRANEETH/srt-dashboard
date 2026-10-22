@@ -39,6 +39,13 @@ constexpr uint8_t GPS_RX = 16, IGN_PIN = 34;
 constexpr uint8_t IGN_ACTIVE_LEVEL = HIGH; // External 12 V ignition requires level shifting.
 uint32_t ignOnAt = 0, lastGps = 0, lastIgn = 0, lastHill = 0, lastBeat = 0, switchAt = 0;
 bool lastIgnState = false, hillRequest = false, switchSeen = false;
+void encodeGpsCoordinate(double degrees, uint8_t *bytes) {
+  // Round the complete coordinate before splitting it. Rounding fractional
+  // minutes alone can emit 6000 near a degree boundary, which receivers reject.
+  const uint32_t units = (uint32_t)lround(degrees * 6000.0);
+  const uint16_t minutes = units % 6000;
+  bytes[0] = units / 6000; bytes[1] = minutes >> 8; bytes[2] = minutes;
+}
 bool startImu() {
   for (const uint8_t address : {uint8_t(0x68), uint8_t(0x69)}) {
     if (!imu.begin(address)) continue;
@@ -65,20 +72,21 @@ void loop() {
   const uint32_t now = millis();
   while (gpsSerial.available()) gps.encode(gpsSerial.read());
   uint32_t id; uint8_t len, data[8];
-  while (canRead(id, len, data)) if (id == 0x300 && len == 1) { hillRequest = (data[0] & (1U << 3)) != 0; switchAt = now; switchSeen = true; }
+  for (uint8_t n=0; n<8 && canRead(id, len, data); ++n) if (id == 0x300) {
+    if (len != 1 || (data[0] & 0x80)) { switchSeen = false; continue; }
+    hillRequest = (data[0] & (1U << 3)) != 0; switchAt = now; switchSeen = true;
+  }
   const bool hillEnabled = switchSeen && now - switchAt <= 3000 && hillRequest;
   if (now - lastGps >= 1000) {
     lastGps = now;
     uint8_t p[8] = {};
     const bool fix = gps.location.isValid() && gps.location.age() < 3000 &&
-                     gps.location.lat() >= 0 && gps.location.lng() >= 0;
+                     isfinite(gps.location.lat()) && isfinite(gps.location.lng()) &&
+                     gps.location.lat() >= 0 && gps.location.lat() <= 90 &&
+                     gps.location.lng() >= 0 && gps.location.lng() <= 180;
     if (fix) {
       const double lat = gps.location.lat(), lon = gps.location.lng();
-      const uint8_t latDeg = (uint8_t)lat, lonDeg = (uint8_t)lon;
-      const uint16_t latMin = (uint16_t)lround((lat - latDeg) * 6000.0);
-      const uint16_t lonMin = (uint16_t)lround((lon - lonDeg) * 6000.0);
-      p[0] = latDeg; p[1] = latMin >> 8; p[2] = latMin;
-      p[3] = lonDeg; p[4] = lonMin >> 8; p[5] = lonMin;
+      encodeGpsCoordinate(lat, p); encodeGpsCoordinate(lon, p+3);
       p[6] = 1; p[7] = min((uint32_t)12, gps.satellites.isValid() ? gps.satellites.value() : 0U);
     }
     canSend(0x400, p);

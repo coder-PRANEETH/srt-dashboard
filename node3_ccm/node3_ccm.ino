@@ -89,7 +89,8 @@ void receiveDriveGate() {
 void sendDriveGateStatus() {
   if(millis()-driveStatusAt<100) return;
   byte data[8]; driveGate.status(data,buildPayload()); driveStatusAt=millis();
-  if(CAN.sendMsgBuf(DRIVE_SWITCH_STATUS_ID,0,8,data)!=CAN_OK) driveGate.lock();
+  if(CAN.sendMsgBuf(DRIVE_SWITCH_STATUS_ID,0,8,data)==CAN_OK) { ++txOK; lastTxAt=millis(); }
+  else { ++txFailed; driveGate.lock(); }
 }
 void printSwitchStates(byte payload) {
   for (byte i = 0; i < 7; ++i) {

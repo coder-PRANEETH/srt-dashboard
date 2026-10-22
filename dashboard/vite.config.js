@@ -50,9 +50,9 @@ export default defineConfig({
      * with stale or missing CSS. A new hash means a new URL, which no
      * cache can have seen before.
      */
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        inlineDynamicImports: true,
+        codeSplitting: false,
         entryFileNames: 'assets/app-[hash:8].js',
         chunkFileNames: 'assets/app-[hash:8].js',
         assetFileNames: 'assets/[name]-[hash:8][extname]',

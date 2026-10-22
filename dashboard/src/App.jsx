@@ -1,7 +1,13 @@
 import HomePage from './HomePage'
 import StatusPage from './StatusPage'
+import SteeringPanel from './SteeringPanel'
 import './App.css'
 
+const goHome = () => window.location.assign('/')
+
 export default function App() {
-  return window.location.pathname.replace(/\/+$/, '') === '/status' ? <StatusPage /> : <HomePage />
+  const path = window.location.pathname.replace(/\/+$/, '')
+  if (path === '/status') return <StatusPage />
+  if (path === '/control') return <SteeringPanel onClose={goHome} />
+  return <HomePage />
 }

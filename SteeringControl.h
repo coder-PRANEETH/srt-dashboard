@@ -12,13 +12,20 @@ inline uint32_t steeringRead32(const uint8_t *d) {
 inline void steeringWrite32(uint8_t *d, uint32_t value) {
   for (uint8_t n=0; n<4; ++n) d[n] = value >> (8*n);
 }
-// Reasons: 0=normal, 1=CAN failure, 2=command timeout, 3=invalid command, 4=hold limit.
+// Reasons: 0=normal, 1=CAN failure, 2=command timeout, 3=invalid command,
+// 4=hold limit, 5=steering angle unavailable.
 // Tokens change after every stop. Delayed commands cannot restart a stopped motor.
 struct SteeringControl {
   uint8_t direction = 0, reason = 0;
   uint32_t token = 1, lastCommandAt = 0, heldAt = 0;
   uint16_t sequence = 0;
   bool sequenced = false;
+  bool feedbackAvailable = false;
+  bool setFeedbackAvailable(bool available) {
+    feedbackAvailable = available;
+    if (direction && !available) { stop(5); return true; }
+    return false;
+  }
   void stop(uint8_t why = 0) {
     direction = 0; reason = why; sequenced = false;
     if (++token == 0) ++token;
@@ -33,6 +40,7 @@ struct SteeringControl {
     tick(now);
     if (len != 8 || d[0] > 2 || (d[0] ? d[1] != STEERING_PWM : d[1] != 0)) { stop(3); return false; }
     if (!d[0]) { stop(); return true; } // STOP is always available.
+    if (!feedbackAvailable) { stop(5); return false; }
     const uint16_t next = d[2] | ((uint16_t)d[3] << 8);
     if (steeringRead32(d+4) != token) return false;
     const uint16_t advance = next - sequence;

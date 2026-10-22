@@ -4,10 +4,11 @@ const fs = require('node:fs')
 const http = require('node:http')
 const path = require('node:path')
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright')
-const root = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'data'))
+const root = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'node5_dash', 'data'))
 const vehicle = {
   canReady: true, frames: 42, acceleratorAdc: 2000, acceleratorPct: 35, acceleratorVoltageEstimate: 0.912, acceleratorRawVoltageEstimate: 1.612,
   steering: { available: true, direction: 0, pwm: 0, reason: 0, ageMs: 10 },
+  steeringDeg: -32.5, steeringLink: true, steeringAgeMs: 10, steeringSequence: 100,
   ignition: true, ignitionUptime: 120, hillRequest: true, pitchDeg: 5, pitchValid: true, holdPct: 0,
   switches: { cruise: true, eco: false, reverse: true, hill: false, horn: false, headlight: true, autonomous: false },
   nodes: [1,2,3,4,5].map(id => ({ id, alive: id === 2 ? null : true, status: id === 2 ? null : 1, error: 0, ageMs: 10 })),
@@ -20,7 +21,7 @@ let frames = [
   { seq: 3, ms: 1000, id: 0x500, dlc: 8, data: [1,90,0,0,0,0,0,0] },
 ]
 const calls = {}, fail = new Set()
-const steering = {ready:true, token:99, direction:0, pwm:0, reason:0, ageMs:10}
+const steering = {ready:true, token:99, direction:0, pwm:0, reason:0, ageMs:10, angleAvailable:true, angleDeg:-32.5, angleAgeMs:10, angleSequence:100}
 const steeringCommands=[]
 const drive={ready:true,token:100,held:false,adc:0,reverse:false,canShift:true,message:''}
 const driveCommands=[]
@@ -74,7 +75,7 @@ const server = http.createServer((req,res) => {
   if (Object.hasOwn(api,pathname)) {
     res.writeHead(fail.has(pathname) ? 503 : 200, { 'Content-Type':'application/json', 'Cache-Control':'no-store' }); res.end(JSON.stringify(api[pathname])); return
   }
-  const relative = ['/', '/status', '/status/'].includes(pathname) ? 'index.html' : pathname.slice(1)
+  const relative = ['/', '/status', '/status/', '/control', '/control/'].includes(pathname) ? 'index.html' : pathname.slice(1)
   const target = path.resolve(root,relative), gz = fs.existsSync(target+'.gz'), file = gz ? target+'.gz' : target
   if (!target.startsWith(root+path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) { res.writeHead(404);res.end();return }
   res.writeHead(200,{ 'Content-Type':mime[path.extname(target)] || 'application/octet-stream', ...(gz ? {'Content-Encoding':'gzip'} : {}) });fs.createReadStream(file).pipe(res)
@@ -90,8 +91,11 @@ const server = http.createServer((req,res) => {
     await page.goto(base)
     await page.getByRole('button',{name:'Skip SRT opening animation'}).click()
     await page.waitForFunction(()=>document.querySelector('.accel-reading')?.textContent==='35%')
-    assert.match(await page.locator('.wheel-reading').innerText(),/\+5.0°/)
+    assert.match(await page.locator('.wheel-reading').innerText(),/-32.5°/)
+    assert.equal(await page.locator('.wheel-rotor').evaluate(el=>el.style.getPropertyValue('--steering-angle')),'-32.5deg')
     assert.equal(await page.locator('a[href*="status"]').count(),0)
+    assert.equal(await page.getByRole('button',{name:'CONTROL'}).count(),0)
+    assert.equal(await page.locator('a[href*="control"]').count(),0)
     assert.equal(await page.getByText('CAN LOG',{exact:true}).count(),0)
     assert.equal(calls['/api/can-log'] || 0,0);assert.equal(calls['/api/diagnostics'] || 0,0)
     assert.equal(Object.keys(calls).filter(p=>p.startsWith('/tiles/')).length,0)
@@ -110,9 +114,19 @@ const server = http.createServer((req,res) => {
     await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0)
     assert.match(await page.evaluate(()=>document.activeElement.textContent),/MAP/)
     assert.equal(calls['/api/steering'] || 0,0)
-    await page.getByRole('button',{name:'CONTROL'}).click()
+    assert.equal(calls['/api/drive'] || 0,0)
+    for(const route of ['/control/','/control']) {
+      const response=await page.goto(base+route)
+      assert.equal(response.status(),200)
+      await page.getByRole('main',{name:'Remote control'}).waitFor()
+      assert.equal(await page.locator('.cockpit,.launch').count(),0)
+      assert.equal(await page.getByRole('dialog').count(),0)
+    }
+    await page.reload()
+    await page.getByRole('heading',{name:'Control',exact:true}).waitFor()
     const left=page.getByRole('button',{name:'Hold left to steer'}),right=page.getByRole('button',{name:'Hold right to steer'})
     await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    assert.match(await page.locator('.remote-steering').innerText(),/CURRENT ANGLE[\s\S]*-32.5°/)
     await page.setViewportSize({width:390,height:844})
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))
     await page.screenshot({animations:'disabled',path:'/tmp/srt-steering-mobile.png'})
@@ -129,6 +143,10 @@ const server = http.createServer((req,res) => {
     await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
     await left.focus();event=waitCommand('left');await page.keyboard.down('Space');await event
     event=waitCommand('stop');await page.keyboard.up('Space');await event
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
+    await left.focus();event=waitCommand('left');await page.keyboard.down('Space');await event
+    event=waitCommand('stop');await page.keyboard.press('Tab');await event;await page.keyboard.up('Space')
+    assert.equal(steering.direction,0,'A keyboard hold still stops when its button loses focus')
     await page.waitForFunction(()=>!document.querySelector('.steering-turn')?.disabled)
     event=waitCommand('left');await press(left);await event
     event=waitCommand('stop');await page.evaluate(()=>window.dispatchEvent(new Event('blur')));await event;await page.mouse.up();assert.equal(steering.direction,0)
@@ -165,6 +183,26 @@ const server = http.createServer((req,res) => {
     // Actual two-finger input: independent steering and throttle holds.
     const lb=await left.boundingBox(),tb=await throttle.boundingBox()
     const lp={x:lb.x+lb.width/2,y:lb.y+lb.height/2,id:11},tp={x:tb.x+tb.width/2,y:tb.y+tb.height/2,id:12}
+    const rb=await right.boundingBox(),rp={x:rb.x+rb.width/2,y:rb.y+rb.height/2,id:14}
+    // Keep throttle held while turning left, releasing steering, then turning right.
+    await throttle.focus()
+    event=waitDrive('throttle');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[tp]});await event
+    for(const [button,steerPoint,direction] of [[left,lp,'left'],[right,rp,'right']]) {
+      await page.waitForFunction(()=>!document.querySelector('.steering-turn').disabled)
+      await button.focus()
+      assert.equal(await throttle.getAttribute('aria-pressed'),'true','Focusing steering preserves the throttle touch hold')
+      event=waitCommand(direction);await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[tp,steerPoint]});await event
+      await throttle.focus()
+      assert.equal(await button.getAttribute('aria-pressed'),'true','Focusing throttle preserves the steering touch hold')
+      await Promise.all([waitDrive('throttle'),waitCommand(direction)])
+      assert.equal(drive.adc,1023);assert.equal(steering.direction,direction==='left'?1:2)
+      event=waitCommand('stop');await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[steerPoint]});await event
+      assert.equal(steering.direction,0);assert.equal(drive.adc,1023,'Releasing steering preserves throttle')
+      await waitDrive('throttle')
+    }
+    event=waitDrive('stop');await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await event
+    assert.equal(drive.adc,0)
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn').disabled&&!document.querySelector('.throttle-hold').disabled)
     event=waitCommand('left');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[lp]});await event
     event=waitDrive('throttle');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[lp,tp]});await event
     assert.equal(steering.direction,1);assert.equal(drive.adc,1023)
@@ -196,16 +234,33 @@ const server = http.createServer((req,res) => {
       assert.ok(await page.locator('.remote-stop').evaluate(el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight}),'STOP remains visible')
     }
     await page.setViewportSize({width:390,height:844});await page.screenshot({animations:'disabled',path:'/tmp/srt-control-mobile.png'})
-    await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0)
+    // Leaving the dedicated page stops both held controls.
+    await page.waitForFunction(()=>!document.querySelector('.steering-turn').disabled&&!document.querySelector('.throttle-hold').disabled)
+    const exitLeft=await left.boundingBox(),exitThrottle=await throttle.boundingBox()
+    const exitPoints=[{id:21,x:exitLeft.x+exitLeft.width/2,y:exitLeft.y+exitLeft.height/2},{id:22,x:exitThrottle.x+exitThrottle.width/2,y:exitThrottle.y+exitThrottle.height/2}]
+    event=waitCommand('left');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:exitPoints.slice(0,1)});await event
+    event=waitDrive('throttle');await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:exitPoints});await event
+    const steerBeforeExit=steeringCommands.length,driveBeforeExit=driveCommands.length
+    await Promise.all([page.waitForURL(base+'/'),page.getByRole('link',{name:'DASHBOARD'}).evaluate(el=>el.click())])
+    // Unload can hide keepalive responses from Playwright; verify server receipt.
+    const exitStopsReceived=()=>steeringCommands.slice(steerBeforeExit).some(c=>c.direction==='stop')&&driveCommands.slice(driveBeforeExit).some(c=>c.action==='stop')
+    for(let n=0;n<100&&!exitStopsReceived();n++)await new Promise(resolve=>setTimeout(resolve,10))
+    assert.ok(exitStopsReceived(),'Both stop commands reach the server when leaving the page')
+    await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})
+    assert.equal(steering.direction,0);assert.equal(drive.adc,0)
+    await page.goto(base+'/control/')
+    await page.getByRole('heading',{name:'Control',exact:true}).waitFor()
+    await Promise.all([page.waitForURL(base+'/'),page.keyboard.press('Escape')])
+    await page.waitForFunction(()=>document.querySelector('.wheel-rotor')?.style.getPropertyValue('--steering-angle')==='-32.5deg')
     await page.setViewportSize({width:1280,height:800})
-    vehicle.pitchDeg=null;vehicle.pitchValid=false;vehicle.acceleratorPct=null
+    vehicle.steeringDeg=null;vehicle.steeringLink=false;vehicle.acceleratorPct=null
     await page.getByText('UNAVAILABLE',{exact:true}).waitFor()
-    assert.equal(await page.locator('.wheel-rotor').evaluate(el=>el.style.getPropertyValue('--pitch')),'5deg')
+    assert.equal(await page.locator('.wheel-rotor').evaluate(el=>el.style.getPropertyValue('--steering-angle')),'-32.5deg')
     assert.equal(await page.locator('.accel-reading').innerText(),'—%')
     vehicle.acceleratorPct=0
     await page.waitForFunction(()=>document.querySelector('.accel-reading')?.textContent==='0%')
     await page.reload();assert.equal(await page.locator('.launch').count(),0)
-    vehicle.acceleratorPct=35;vehicle.pitchDeg=5;vehicle.pitchValid=true
+    vehicle.acceleratorPct=35;vehicle.steeringDeg=-32.5;vehicle.steeringLink=true
     await page.goto(base+'/status/')
     await page.getByText('CONNECTED',{exact:true}).waitFor()
     await page.locator('.node').nth(0).click();assert.match(await page.locator('.node-detail').innerText(),/Corrected voltage[\s\S]*0.912 V/);assert.match(await page.locator('.node-detail').innerText(),/Steering PWM output/);
@@ -249,8 +304,8 @@ const server = http.createServer((req,res) => {
     await page.goto(base+'/status');await page.getByText('CONNECTED',{exact:true}).waitFor()
     const reduced=await browser.newPage({reducedMotion:'reduce'});await reduced.goto(base);assert.equal(await reduced.locator('.launch').count(),0)
     assert.deepEqual(errors,[])
-    console.log('Packed drive passed: adjustable zero-default level, reverse lock, simultaneous two-finger input, shared STOP, release and recovery')
+    console.log('Packed drive passed: adjustable zero-default level, reverse lock, throttle-first left/right multi-touch across focus changes, independent release, shared STOP and recovery')
     console.log('Packed steering passed: pointer/keyboard release, drag-away, blur, reconnect, touch cancel and conflicting multi-touch')
-    console.log('Packed UI passed: routes, layouts, lazy map, IMU freeze, unknown feedback, filters, pause, copy/export, API failures, recovery, reduced motion')
+    console.log('Packed UI passed: direct /control and /control/ routes, refresh, no homepage control button, stop on navigation, layouts, lazy map, wireless steering angle/freeze, unknown feedback, filters, pause, copy/export, API failures, recovery, reduced motion')
   } finally {await browser.close();server.close()}
 })().catch(e=>{console.error(e);server.close();process.exitCode=1})

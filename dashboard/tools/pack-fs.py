@@ -9,13 +9,13 @@ Three things happen here, all needed to make the site fit:
   2. Blank tiles are dropped. LittleFS allocates 4 KB blocks, so a
      156-byte tile of empty farmland costs a whole block. The site draws
      its own blank square where a tile is missing, so this is invisible.
-  3. Everything is copied to data/, which is what
+  3. Everything is copied to node5_dash/data/, which is what
      the Arduino LittleFS uploader flashes.
 
 Run after every `npm run build`.
 
 Usage:
-    python3 tools/pack-fs.py              # pack dist/ -> data/
+    python3 tools/pack-fs.py              # pack dist/ -> ../node5_dash/data/
     python3 tools/pack-fs.py --dry-run
     python3 tools/pack-fs.py --in-place   # pack data/ where it already is,
                                           # for when dist/ has been cleaned
@@ -39,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DASHBOARD = os.path.dirname(HERE)
 REPO = os.path.dirname(DASHBOARD)
 DIST = os.path.join(DASHBOARD, 'dist')
-DATA = os.path.join(REPO, 'data')
+DATA = os.path.join(REPO, 'node5_dash', 'data')
 
 
 def blocks(size):

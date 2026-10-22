@@ -1,12 +1,15 @@
 #include <cassert>
 #include <cstdio>
 #include "SteeringControl.h"
+#include "SteeringFeedback.h"
 void command(uint8_t *d, uint8_t dir, uint16_t seq, uint32_t token) {
   d[0]=dir; d[1]=dir ? 60 : 0; d[2]=seq; d[3]=seq>>8; steeringWrite32(d+4,token);
 }
 int main() {
   SteeringControl s; uint8_t d[8] = {};
   assert(!s.direction);
+  command(d,1,1,s.token); assert(!s.accept(d,8,99)); assert(!s.direction && s.reason==5);
+  s.setFeedbackAvailable(true);
   command(d,1,1,s.token); assert(s.accept(d,8,100)); assert(s.direction==1);
   assert(!s.accept(d,8,200)); // Replay does not renew the lease.
   assert(!s.tick(449)); assert(s.tick(450)); assert(s.direction==0 && s.reason==2);
@@ -24,6 +27,11 @@ int main() {
   command(d,2,1,s.token); assert(s.accept(d,8,0xfffffff0));
   assert(!s.tick(100)); assert(s.tick(334)); assert(!s.direction); // millis rollover.
   command(d,1,1,s.token); assert(s.accept(d,8,500)); assert(!s.accept(d,7,510)); assert(!s.direction);
+  command(d,1,1,s.token); assert(s.accept(d,8,600));
+  const auto oldToken=s.token;
+  assert(s.setFeedbackAvailable(false)); assert(!s.direction && s.reason==5 && s.token!=oldToken);
+  s.setFeedbackAvailable(true); assert(!s.accept(d,8,601)); assert(!s.direction);
+  command(d,0,0,0); s.setFeedbackAvailable(false); assert(s.accept(d,8,602));
   SteeringRelay r;
   assert(!r.accept(1,1,r.token,9,false,100));
   assert(r.accept(1,1,r.token,9,true,100));
@@ -34,5 +42,30 @@ int main() {
   assert(r.tick(450)); assert(!r.accept(1,2,lease,9,true,451));
   assert(r.accept(2,1,r.token,9,true,500));
   r.stop(); assert(!r.direction); assert(!r.accept(2,2,lease,9,true,501));
+  SteeringFeedback f;
+  assert(!f.fresh(0)); f.status(d,0); assert(!d[3] && d[2]==255);
+  IMUData packet={-45.25f,100};
+  auto accept=[&](uint32_t now){return f.accept((const uint8_t*)&packet,sizeof(packet),now);};
+  assert(accept(1000)); assert(f.angle==-45.25f && f.sequence==100 && f.fresh(1249));
+  f.status(d,1025); assert(steeringAngleFrameValid(d) && steeringAngleTenths(d)==-453);
+  assert(d[2]==25 && d[3]==1 && steeringAngleSequence(d)==100);
+  assert(steeringAngleFrameFresh(d,224)); assert(!steeringAngleFrameFresh(d,225));
+  assert(!accept(1100)); assert(f.receivedAt==1000); // Duplicate cannot keep link alive.
+  packet.sequence=99; assert(!accept(1101));
+  packet.sequence=101; packet.steeringAngle=NAN; assert(!accept(1102));
+  packet.steeringAngle=INFINITY; assert(!accept(1103));
+  packet.steeringAngle=180.1f; assert(!accept(1104));
+  packet.steeringAngle=-180.1f; assert(!accept(1105));
+  assert(!f.accept((const uint8_t*)&packet,7,1106)); assert(!f.accept(nullptr,8,1107));
+  assert(f.receivedAt==1000 && !f.fresh(1250));
+  f.status(d,1250); assert(!d[3] && d[2]==250 && !steeringAngleFrameFresh(d,0));
+  packet={0,0}; assert(accept(1250)); assert(f.outages==1 && f.fresh(1250)); // Transmitter reboot.
+  packet={180,1}; assert(accept(1251)); f.status(d,1251); assert(steeringAngleTenths(d)==1800);
+  packet={-180,2}; assert(accept(1252)); f.status(d,1252); assert(steeringAngleTenths(d)==-1800);
+  SteeringFeedback wrapped;
+  packet={12.3f,0xFFFFFFFF}; assert(wrapped.accept((const uint8_t*)&packet,8,0xFFFFFFF0));
+  packet.sequence=0; assert(wrapped.accept((const uint8_t*)&packet,8,100)); assert(wrapped.fresh(349)); assert(!wrapped.fresh(350));
+  d[3]=2; assert(!steeringAngleFrameValid(d)); d[3]=1; d[0]=0x7F; assert(!steeringAngleFrameValid(d));
   puts("Steering state tests passed: release, replay, timeout, hold limit, invalid PWM, reversal, millis wrap");
+  puts("Wireless angle tests passed: packet ABI, signed CAN angle, age, validation, duplicates, sequence/millis wrap, reboot and feedback interlock");
 }

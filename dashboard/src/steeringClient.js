@@ -2,6 +2,7 @@
 export function createSteeringClient(onState, fetcher = fetch) {
   let disposed = false, held = null, pollTimer, moveTimer, limitTimer, motionRequest, generation = 0
   let state = { ready: false, direction: null, pwm: null, held: 0, message: 'CONNECTING' }
+  const availabilityMessage = data => data.ready ? '' : data.angleAvailable === false ? 'STEERING ANGLE UNAVAILABLE' : 'NODE 1 UNAVAILABLE'
   const publish = patch => { state = { ...state, ...patch }; if (!disposed) onState(state) }
   async function request(method, params, signal, keepalive = false) {
     const controller = new AbortController(), abort = () => controller.abort()
@@ -13,6 +14,9 @@ export function createSteeringClient(onState, fetcher = fetch) {
       if (!response.ok) throw new Error(response.status === 409 ? 'RELEASE & RETRY' : 'CONTROL UNAVAILABLE')
       const data = await response.json()
       if (typeof data.ready !== 'boolean' || !Number.isInteger(data.token)) throw new Error('CONTROL UNAVAILABLE')
+      if (data.ready && (!Number.isInteger(data.direction) || data.direction<0 || data.direction>2 ||
+        data.pwm!==(data.direction?60:0) || data.angleAvailable!==true ||
+        !Number.isFinite(data.angleDeg) || Math.abs(data.angleDeg)>180)) throw new Error('CONTROL UNAVAILABLE')
       return data
     } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort) }
   }
@@ -21,8 +25,8 @@ export function createSteeringClient(onState, fetcher = fetch) {
     publish({ ready: false, held: 0, message })
     try {
       const data = await request('POST', { direction: 'stop' }, null, true)
-      if (!held && generation === stoppedGeneration) publish({ ...data, message })
-    } catch { if (!held && generation === stoppedGeneration) publish({ ready: false, direction: null, pwm: null, message: 'CONNECTION LOST' }) }
+      if (!held && generation === stoppedGeneration) publish({ ...data, message: message || availabilityMessage(data) })
+    } catch { if (!held && generation === stoppedGeneration) publish({ ready: false, direction: null, pwm: null, angleAvailable: false, angleDeg: null, message: 'CONNECTION LOST' }) }
   }
   async function poll() {
     if (disposed) return
@@ -30,8 +34,8 @@ export function createSteeringClient(onState, fetcher = fetch) {
     if (!held) {
       try {
         const data = await request('GET')
-        if (before === generation && !held) publish({ ...data, message: data.ready ? '' : 'NODE 1 UNAVAILABLE' })
-      } catch { if (before === generation && !held) publish({ ready: false, direction: null, pwm: null, message: 'CONNECTION LOST' }) }
+        if (before === generation && !held) publish({ ...data, message: availabilityMessage(data) })
+      } catch { if (before === generation && !held) publish({ ready: false, direction: null, pwm: null, angleAvailable: false, angleDeg: null, message: 'CONNECTION LOST' }) }
     }
     if (!disposed) pollTimer = setTimeout(poll, 250)
   }

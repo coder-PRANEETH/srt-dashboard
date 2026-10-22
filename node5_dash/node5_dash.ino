@@ -12,7 +12,8 @@ Verification:
   Dashboard should load from LittleFS; /api/can-log frame count and
   Node 1/3 activity should appear from 0x301/0x300 without heartbeats.
   /api/vehicle shows little-endian pedal ADC, ADC-scale percent and an
-  estimated GPIO voltage. Node 2 is receive-only; its health is unknown.
+  estimated GPIO voltage. Node 2 reports motor output on 0x201 and
+  health on 0x600; older receive-only firmware remains unknown.
   /api/gps shows a fix only after valid 0x400; /api/data speed needs two
   successive usable GPS fixes. Change the initial AP password in code.
 
@@ -28,6 +29,7 @@ Shared CAN connection (classic ESP32 + MCP2515):
 #include "CanCommon.h"
 #include "ThrottleCalibration.h"
 #include "SteeringControl.h"
+#include "SteeringFeedback.h"
 #include "RemoteDrive.h"
 #include <esp_system.h>
 #include <WiFi.h>
@@ -59,6 +61,14 @@ bool fsReady = false;
 float gpsSpeedKmh = NAN, prevLat = NAN, prevLon = NAN;
 uint32_t prevGpsAt = 0;
 
+template<size_t N> bool sendLoggedCan(uint32_t id, const uint8_t (&data)[N]) {
+  if(!canSend(id,data)) return false;
+  LogFrame &f=logFrames[logNext]; f.seq=++frameCount; f.ms=millis(); f.id=id; f.len=N; f.tx=true;
+  memset(f.bytes,0,8); memcpy(f.bytes,data,N);
+  logNext=(logNext+1)%64; if(logCount<64) ++logCount;
+  return true;
+}
+
 Sample *sampleFor(uint32_t id) {
   for (size_t i = 0; i < sizeof(ids)/sizeof(ids[0]); ++i) if (ids[i] == id) return &samples[i];
   return nullptr;
@@ -74,27 +84,32 @@ float distanceMeters(float a, float b, float c, float d) {
 }
 void readCan() {
   uint32_t id; uint8_t len, data[8];
-  while (canRead(id, len, data)) {
+  for (uint8_t n=0; n<16 && canRead(id, len, data); ++n) {
     const uint32_t now = millis();
     ++frameCount;
     LogFrame &f = logFrames[logNext];
     f.tx=false; f.seq = frameCount; f.ms = now; f.id = id; f.len = len; memcpy(f.bytes, data, 8);
     logNext = (logNext + 1) % 64; if (logCount < 64) ++logCount;
-    if (id == 0x600 && len == 8 && data[0] >= 1 && data[0] <= 5) {
+    const bool validHeartbeat = len == 8 && data[0] >= 1 && data[0] <= 5 && data[1] <= 1;
+    if (id == 0x600 && validHeartbeat) {
       NodeState &n = nodes[data[0]];
       n.seen = true; n.at = now; n.status = data[1]; n.error = data[3]; n.tx = data[4]; n.rx = data[5];
     }
     Sample *s = sampleFor(id);
     const uint8_t expectedLength = id == 0x300 ? 1 : id == 0x301 ? 2 : 8;
-    const bool validGps = id != 0x400 || !data[6] ||
+    const bool validGps = id != 0x400 || (data[6] <= 1 && (!data[6] ||
       (data[0] <= 90 && data[3] <= 180 && be16(data+1) < 6000 && be16(data+4) < 6000 &&
-       (data[0] < 90 || be16(data+1) == 0) && (data[3] < 180 || be16(data+4) == 0));
-    const bool validPitch = id != 0x500 || !data[3] || data[1] <= 180;
-    const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095) && validGps && validPitch &&
-      ((id != 0x121 && id != 0x122) || (data[3]==0xD1 && (data[0]&0x7F)<=2 && le16(data+1)<=(id==0x121 ? 4095 : 127))) &&
-      (id != STEERING_STATUS_ID || (data[0] <= 2 && data[1] == (data[0] ? STEERING_PWM : 0) && data[3] == 1));
+       (data[0] < 90 || be16(data+1) == 0) && (data[3] < 180 || be16(data+4) == 0))));
+    const bool validPitch = id != 0x500 || (data[0] <= 1 && data[2] <= 100 && data[3] <= 1 && (!data[3] || data[1] <= 180));
+    const bool validMotor = id != 0x201 || (data[0]<=1 && data[1]<=1 && data[2]<=1 && data[3]<=100 &&
+      data[4]<=1 && data[5]<=1 && data[6]<=1 && data[7]<=8);
+    const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095) &&
+      (id != 0x300 || !(data[0]&0x80)) && (id != 0x401 || data[0]<=1) && validGps && validPitch && validMotor &&
+      (id != STEERING_ANGLE_ID || steeringAngleFrameValid(data)) &&
+      ((id != 0x121 && id != 0x122) || driveStatusValid(data,id==0x121 ? 4095 : 127)) &&
+      (id != STEERING_STATUS_ID || (data[0] <= 2 && data[1] == (data[0] ? STEERING_PWM : 0) && data[2] <= 5 && data[3] == 1));
     if (s) { ++s->received; if (!validPayload) { ++s->invalid; ++malformedFrames; } }
-    else if (id == 0x600) { if (len != 8 || data[0] < 1 || data[0] > 5) ++malformedFrames; }
+    else if (id == 0x600) { if (!validHeartbeat) ++malformedFrames; }
     else ++unknownFrames;
     if (s && validPayload) {
       memcpy(s->bytes, data, 8); s->len = len; s->at = now; s->seen = true;
@@ -141,13 +156,16 @@ void sendVehicle() {
   Sample *steer=sampleFor(0x100), *lamps=sampleFor(0x101), *immo=sampleFor(0x151), *cmd=sampleFor(0x200);
   Sample *motor=sampleFor(0x201), *sw=sampleFor(0x300), *accel=sampleFor(0x301), *brake=sampleFor(0x302);
   Sample *ign=sampleFor(0x401), *hill=sampleFor(0x500), *summon=sampleFor(0x501);
-  bool a=fresh(steer, 250), l=fresh(lamps, 500), m=fresh(motor, 250), s=fresh(sw, 3001);
+  bool a=fresh(steer, STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(steer->bytes, millis()-steer->at);
+  bool l=fresh(lamps, 500), m=fresh(motor, 250), s=fresh(sw, 3001);
   bool p=fresh(accel, 501), b=fresh(brake, 250), i=fresh(ign, 3000), h=fresh(hill, 1000);
   String j; j.reserve(1600);
   j = "{\"canReady\":"; j += canReady ? "true" : "false";
   j += ",\"frames\":" + String(frameCount);
-  j += ",\"steeringDeg\":" + maybeNumber(a && steer->bytes[3], (int16_t)be16(steer->bytes)/10.0f, 1);
-  j += ",\"steeringLink\":" + maybeBool(a, steer->bytes[3]);
+  j += ",\"steeringDeg\":" + maybeNumber(a, steeringAngleTenths(steer->bytes)/10.0f, 1);
+  j += ",\"steeringLink\":" + String(a ? "true" : "false");
+  j += ",\"steeringAgeMs\":" + (steer->seen ? String(millis()-steer->at+steer->bytes[2]) : "null");
+  j += ",\"steeringSequence\":" + (steer->seen ? String(steeringAngleSequence(steer->bytes)) : "null");
   j += ",\"horn\":" + maybeBool(l, lamps->bytes[0]);
   j += ",\"headlight\":" + maybeBool(l, lamps->bytes[1]);
   j += ",\"immoState\":" + maybeNumber(fresh(immo, 3000), immo->bytes[0]);
@@ -156,6 +174,7 @@ void sendVehicle() {
   j += ",\"motor2\":" + maybeBool(m, motor->bytes[1]);
   j += ",\"reverseActive\":" + maybeBool(m, motor->bytes[2]);
   j += ",\"throttleOut\":" + maybeNumber(m, motor->bytes[3]);
+  j += ",\"powertrainReason\":" + maybeNumber(m, motor->bytes[7]);
   j += ",\"cruiseActive\":" + maybeBool(m, motor->bytes[4]);
   j += ",\"ecoActive\":" + maybeBool(m, motor->bytes[5]);
   j += ",\"hillActive\":" + maybeBool(m, motor->bytes[6]);
@@ -179,8 +198,8 @@ void sendVehicle() {
   j += "},\"nodes\":[";
   for (uint8_t n=1; n<=5; ++n) {
     if (n>1) j += ',';
-    if (n == 2) {
-      // This supplied motor controller receives frames but transmits no status.
+    if (n == 2 && !nodes[2].seen) {
+      // Older receive-only Node 2 firmware remains unobservable.
       j += "{\"id\":2,\"alive\":null,\"source\":\"receive-only\",\"status\":null,\"error\":null,\"tx\":null,\"rx\":null,\"ageMs\":null}";
       continue;
     }
@@ -278,7 +297,7 @@ bool sendFile(String path) {
   server.setContentLength(f.size()); server.send(200, mime(path), "");
   char chunk[1024];
   while (f.available() && server.client().connected()) {
-    readCan(); serviceDrive(); size_t n=f.readBytes(chunk, sizeof(chunk)); server.sendContent(chunk, n); yield();
+    readCan(); serviceDrive(); serviceSteeringRelay(); size_t n=f.readBytes(chunk, sizeof(chunk)); server.sendContent(chunk, n); yield();
   }
   f.close(); readCan(); return true;
 }
@@ -300,13 +319,14 @@ void sendDiagnostics() {
   j += ",\"lastRxAgeMs\":" + (canRxTotal ? String(millis() - canLastRxAt) : "null");
   j += ",\"malformedFrames\":" + String(malformedFrames) + ",\"unknownFrames\":" + String(unknownFrames);
   j += ",\"signals\":[";
-  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500,0x111,0x121,0x122};
-  const uint16_t timeouts[] = {501,3001,3000,3000,1000,600,350,350};
-  for (uint8_t n=0; n<8; ++n) {
+  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500,0x111,0x121,0x122,STEERING_ANGLE_ID};
+  const uint16_t timeouts[] = {501,3001,3000,3000,1000,600,350,350,STEERING_FEEDBACK_TIMEOUT_MS};
+  for (uint8_t n=0; n<sizeof(signalIds)/sizeof(signalIds[0]); ++n) {
     const Sample *s = sampleFor(signalIds[n]);
     if (n) j += ',';
     j += "{\"id\":" + String(signalIds[n]) + ",\"seen\":" + String(s->seen ? "true" : "false");
-    j += ",\"fresh\":" + String(fresh(s, timeouts[n]) ? "true" : "false");
+    const bool live = fresh(s, timeouts[n]) && (signalIds[n] != STEERING_ANGLE_ID || steeringAngleFrameFresh(s->bytes, millis()-s->at));
+    j += ",\"fresh\":" + String(live ? "true" : "false");
     j += ",\"ageMs\":" + (s->seen ? String(millis()-s->at) : "null");
     j += ",\"timeoutMs\":" + String(timeouts[n]) + ",\"dlc\":" + String(s->len);
     j += ",\"received\":" + String(s->received) + ",\"invalid\":" + String(s->invalid) + "}";
@@ -320,28 +340,40 @@ void sendDashboard() {
 // remains public to clients on the dashboard AP; no GET can actuate a motor.
 bool steeringNodeReady() {
   const Sample *s = sampleFor(STEERING_STATUS_ID);
-  return canReady && fresh(s, 600) && s->bytes[3] == 1;
+  const Sample *angle = sampleFor(STEERING_ANGLE_ID);
+  return canReady && fresh(s, 600) && s->bytes[3] == 1 &&
+    fresh(angle, STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(angle->bytes, millis()-angle->at);
 }
 void stopSteeringRelay() {
   steeringRelay.stop();
   const uint8_t data[8] = {};
-  canSend(STEERING_COMMAND_ID, data);
+  sendLoggedCan(STEERING_COMMAND_ID, data);
 }
 void serviceSteeringRelay() {
-  if (steeringRelay.tick(millis())) {
+  const Sample *s = sampleFor(STEERING_STATUS_ID);
+  if (steeringRelay.direction && (!steeringNodeReady() || steeringRead32(s->bytes+4) != steeringRelay.nodeToken)) {
+    stopSteeringRelay();
+  } else if (steeringRelay.tick(millis())) {
     const uint8_t data[8] = {};
-    canSend(STEERING_COMMAND_ID, data);
+    sendLoggedCan(STEERING_COMMAND_ID, data);
   }
 }
 void sendSteeringState() {
   readCan(); serviceSteeringRelay();
   const Sample *s = sampleFor(STEERING_STATUS_ID);
+  const Sample *angle = sampleFor(STEERING_ANGLE_ID);
+  const bool statusLive = fresh(s, 600);
+  const bool angleLive = fresh(angle, STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(angle->bytes, millis()-angle->at);
   const bool ready = steeringNodeReady();
   String j = "{\"ready\":" + String(ready ? "true" : "false");
   j += ",\"token\":" + String(steeringRelay.token);
-  j += ",\"direction\":" + (ready ? String(s->bytes[0]) : "null");
-  j += ",\"pwm\":" + (ready ? String(s->bytes[1]) : "null");
-  j += ",\"reason\":" + (ready ? String(s->bytes[2]) : "null");
+  j += ",\"direction\":" + (statusLive ? String(s->bytes[0]) : "null");
+  j += ",\"pwm\":" + (statusLive ? String(s->bytes[1]) : "null");
+  j += ",\"reason\":" + (statusLive ? String(s->bytes[2]) : "null");
+  j += ",\"angleAvailable\":" + String(angleLive ? "true" : "false");
+  j += ",\"angleDeg\":" + maybeNumber(angleLive, steeringAngleTenths(angle->bytes)/10.0f, 1);
+  j += ",\"angleAgeMs\":" + (angle->seen ? String(millis()-angle->at+angle->bytes[2]) : "null");
+  j += ",\"angleSequence\":" + (angle->seen ? String(steeringAngleSequence(angle->bytes)) : "null");
   j += ",\"ageMs\":" + (s->seen ? String(millis()-s->at) : "null");
   j += ",\"timeoutMs\":350,\"holdMs\":5000}";
   server.sendHeader("Cache-Control", "no-store"); server.send(200, "application/json", j);
@@ -376,7 +408,7 @@ void handleSteeringCommand() {
   }
   uint8_t data[8] = {steeringRelay.direction, STEERING_PWM, (uint8_t)seq, (uint8_t)(seq>>8),0,0,0,0};
   steeringWrite32(data+4, steeringRelay.nodeToken);
-  if (!canSend(STEERING_COMMAND_ID, data)) {
+  if (!sendLoggedCan(STEERING_COMMAND_ID, data)) {
     stopSteeringRelay(); server.send(503,"application/json","{\"error\":\"CAN send failed\"}"); return;
   }
   // This acknowledges transmission, not physical steering position.
@@ -395,22 +427,15 @@ bool driveReady() {
   return drivePedalIdle() && (drive.held || ((sampleFor(0x121)->bytes[0]&3)!=1 && (sampleFor(0x122)->bytes[0]&3)!=1));
 }
 bool driveCanShift() { return !drive.held && (!drive.session || millis()-drive.stoppedAt>=DRIVE_SETTLE_MS); }
-template<size_t N> bool driveSend(uint32_t id, const uint8_t (&data)[N]) {
-  if(!canSend(id,data)) return false;
-  LogFrame &f=logFrames[logNext]; f.seq=++frameCount; f.ms=millis(); f.id=id; f.len=N; f.tx=true;
-  memset(f.bytes,0,8); memcpy(f.bytes,data,N);
-  logNext=(logNext+1)%64; if(logCount<64) ++logCount;
-  return true;
-}
 bool sendDriveGate(uint8_t op) {
   uint8_t data[8]={op,(uint8_t)drive.wireReverse,0,0,0,0,0,0};
   driveWrite32(data+2,drive.session); ++drive.gateSeq;
   data[6]=drive.gateSeq; data[7]=drive.gateSeq>>8;
-  return driveSend(DRIVE_GATE_ID,data);
+  return sendLoggedCan(DRIVE_GATE_ID,data);
 }
 bool sendDriveAdc(uint16_t adc) {
   const uint8_t data[2]={(uint8_t)adc,(uint8_t)(adc>>8)};
-  const bool sent=driveSend(0x301,data); drive.adc=sent ? adc : 0; return sent;
+  const bool sent=sendLoggedCan(0x301,data); drive.adc=sent ? adc : 0; return sent;
 }
 void stopDrive(const char *reason="") {
   const bool owned=drive.paired || driveGateAt(0x121,1) || driveGateAt(0x121,2);
@@ -452,7 +477,7 @@ void serviceDrive() {
   const uint8_t switches[1]={driveSwitchMask(sampleFor(0x122)->bytes[1],drive.wireReverse)};
   const bool directionAck=bool(sampleFor(0x121)->bytes[0]&0x80)==drive.wireReverse && bool(sampleFor(0x122)->bytes[0]&0x80)==drive.wireReverse;
   const uint16_t adc=directionAck && drive.wireReverse==drive.reverse && now-drive.settledAt>=DRIVE_SETTLE_MS ? (uint32_t)drive.percent*4095/100 : 0;
-  if(!driveSend(0x300,switches) || !sendDriveAdc(adc)) stopDrive("CAN SEND FAILED");
+  if(!sendLoggedCan(0x300,switches) || !sendDriveAdc(adc)) stopDrive("CAN SEND FAILED");
 }
 void sendDriveState() {
   readCan(); serviceDrive();
@@ -522,6 +547,7 @@ void setup() {
   server.on("/api/vehicle", sendVehicle); server.on("/api/can-log", sendCanLog);
   server.on("/api/diagnostics", sendDiagnostics);
   server.on("/status", sendDashboard); server.on("/status/", sendDashboard);
+  server.on("/control", sendDashboard); server.on("/control/", sendDashboard);
   server.onNotFound([](){
     if (server.uri().startsWith("/api/")) { server.send(404,"application/json","{\"error\":\"unknown API\"}"); return; }
     if (sendFile(server.uri())) return;
@@ -533,7 +559,7 @@ void setup() {
 void loop() {
   readCan(); serviceDrive(); serviceSteeringRelay(); server.handleClient(); readCan(); serviceDrive(); serviceSteeringRelay();
   if (millis()-lastBeat >= 1000) { lastBeat=millis(); canPrintStatus("Node 5 dashboard");
-    Serial.printf("Dashboard: WiFi clients=%u LittleFS=%s buffered frames=%u total frames=%lu | Node 1=%s Node 3=%s | Node 2=receive-only\n",
+    Serial.printf("Dashboard: WiFi clients=%u LittleFS=%s buffered frames=%u total frames=%lu | Node 1=%s Node 3=%s | Node 2 status: inspect 0x201/0x600\n",
                   WiFi.softAPgetStationNum(), fsReady ? "READY" : "MISSING", logCount, (unsigned long)frameCount,
                   fresh(sampleFor(0x301), 501) ? "LIVE" : "NO RECENT DATA", fresh(sampleFor(0x300), 3001) ? "LIVE" : "NO RECENT DATA");
     canHeartbeat(5, canReady?1:0, canReady?0:1); }

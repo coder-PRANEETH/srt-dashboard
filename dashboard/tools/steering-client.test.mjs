@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as wait } from 'node:timers/promises'
 import { createSteeringClient } from '../src/steeringClient.js'
-const reply = data => ({ ok:true, json:async()=>data })
+const reply = data => ({ ok:true, json:async()=>({angleAvailable:true,angleDeg:12.3,...data}) })
 test('late motion response after release cannot resume or overwrite STOP', async () => {
   let token=10, completeMotion, latest, movements=0, ready
   const initialized = new Promise(resolve=>ready=resolve)
@@ -33,4 +33,13 @@ test('failed command stops once and does not restart after healthy polling', asy
   const client=createSteeringClient(state=>{latest=state;ready()},fetcher)
   try {await initialized;client.start(2);await wait(350);assert.equal(movements,1);assert.equal(stops,1);assert.equal(latest.held,0)}
   finally {client.dispose()}
+})
+test('missing or invalid steering angle prevents a new gesture', async()=>{
+  for(const angleDeg of [null,NaN,181]) {
+    let settled,latest
+    const initialized=new Promise(resolve=>settled=resolve)
+    const client=createSteeringClient(state=>{latest=state;settled()},async()=>reply({ready:true,token:1,direction:0,pwm:0,angleDeg}))
+    try {await initialized;assert.equal(latest.ready,false);assert.equal(client.start(1),false)}
+    finally {client.dispose()}
+  }
 })

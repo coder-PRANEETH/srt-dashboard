@@ -12,6 +12,10 @@ inline uint32_t driveRead32(const uint8_t *d) {
   return (uint32_t)d[0] | ((uint32_t)d[1]<<8) | ((uint32_t)d[2]<<16) | ((uint32_t)d[3]<<24);
 }
 inline void driveWrite32(uint8_t *d, uint32_t n) { for(uint8_t k=0;k<4;++k) d[k]=n>>(8*k); }
+inline bool driveStatusValid(const uint8_t *d, uint16_t maxRaw) {
+  return d[3]==0xD1 && (d[0]&0x7F)<=2 &&
+    (d[1] | ((uint16_t)d[2]<<8))<=maxRaw;
+}
 inline uint8_t driveSwitchMask(uint8_t physical, bool reverse) {
   // Retain lights/horn/eco/hill, but disable cruise/autonomous during simulation.
   return (physical & ~((1U<<0)|(1U<<2)|(1U<<6))) | (reverse ? 4 : 0);

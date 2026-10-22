@@ -62,17 +62,21 @@ inline void canPrintFrame(uint32_t id, const uint8_t (&d)[8], uint8_t len, const
   }
   if (id == 0x301 && len == 2) {
     const uint16_t adc = d[0] | ((uint16_t)d[1] << 8);
-    Serial.printf("accelerator ADC=%u/4095 voltage estimate=%.3f V\n", adc, adc * (3.3f / 4095.0f));
+    Serial.printf("accelerator ADC=%u/4095 raw pin voltage estimate=%.3f V\n", adc, adc * (3.3f / 4095.0f));
     return;
   }
   if (id == 0x300 || id == 0x301 || len != 8) {
     Serial.println("unexpected payload length"); return;
   }
   switch (id) {
+    case 0x100:
+      if (d[3]) Serial.printf("steering angle=%.1f deg source age=%u ms link=LIVE\n", (int16_t)canLogU16(d) / 10.0, d[2]);
+      else Serial.println("steering angle=unavailable link=STALE/MISSING");
+      break;
     case 0x201:
-      Serial.printf("motor1=%s motor2=%s reverse=%s throttle=%u%% cruise=%s ECO=%s hill=%s\n",
+      Serial.printf("motor1=%s motor2=%s reverse=%s throttle=%u%% cruise=%s ECO=%s hill=%s stop reason=%u\n",
                     canLogOn(d[0]), canLogOn(d[1]), canLogOn(d[2]), d[3],
-                    canLogOn(d[4]), canLogOn(d[5]), canLogOn(d[6]));
+                    canLogOn(d[4]), canLogOn(d[5]), canLogOn(d[6]), d[7]);
       break;
     case 0x7A3:
       Serial.printf("switches cruise=%s ECO=%s reverse=%s hill=%s horn=%s auto=%s lights=%s",
