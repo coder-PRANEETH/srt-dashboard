@@ -73,8 +73,8 @@ void loop() {
   while (gpsSerial.available()) gps.encode(gpsSerial.read());
   uint32_t id; uint8_t len, data[8];
   for (uint8_t n=0; n<8 && canRead(id, len, data); ++n) if (id == 0x300) {
-    if (len != 1 || (data[0] & 0x80)) { switchSeen = false; continue; }
-    hillRequest = (data[0] & (1U << 3)) != 0; switchAt = now; switchSeen = true;
+    if (len != 1 || (data[0] & ~SWITCH_VALID_MASK)) { switchSeen = false; continue; }
+    hillRequest = (data[0] & SWITCH_HILL_HOLD) != 0; switchAt = now; switchSeen = true;
   }
   const bool hillEnabled = switchSeen && now - switchAt <= 3000 && hillRequest;
   if (now - lastGps >= 1000) {

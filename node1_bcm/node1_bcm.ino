@@ -52,7 +52,7 @@ void setupSteeringReceiver() {
     esp_now_deinit(); Serial.println("ERROR: steering receive callback failed"); return;
   }
   steeringRadioReady = true;
-  Serial.printf("Steering ESP-NOW listening on channel %u | float angle + uint32 sequence (8 bytes)\n", STEERING_WIFI_CHANNEL);
+  Serial.printf("Steering ESP-NOW listening on channel %u | angle + sequence (8 bytes), optional horn (9 bytes) | range +/-%d deg\n", STEERING_WIFI_CHANNEL, STEERING_MAX_ANGLE_DEG);
 }
 
 #define ACCELERATOR_PIN 34
@@ -62,30 +62,84 @@ const int MOTOR_SPEED = 60; // User-tested 8-bit analogWrite duty, not percent.
 static_assert(MOTOR_SPEED == STEERING_PWM, "Steering protocol PWM must match motor configuration");
 SteeringControl steering;
 uint8_t appliedDirection = 255;
+uint8_t appliedPWM = 0;
 uint32_t lastSteeringStatus = 0;
 bool steeringStatusPending = true;
+
+// Local Serial Monitor motor check; normal CAN steering keeps its own rules.
+constexpr uint8_t SERIAL_STEERING_STEP = 10;
+constexpr uint32_t SERIAL_STEERING_RUN_MS = 5000;
+uint8_t serialSteeringPWM = MOTOR_SPEED;
+bool serialSteeringActive = false;
+uint32_t serialSteeringStartedAt = 0;
 
 void stopMotor() {
   analogWrite(MOTOR_LPWM, 0);
   analogWrite(MOTOR_RPWM, 0);
 }
 void applySteering() {
-  if (appliedDirection == steering.direction) return;
+  if (appliedDirection == steering.direction && appliedPWM == steering.pwm) return;
   stopMotor();
-  if (steering.direction == 1) analogWrite(MOTOR_LPWM, MOTOR_SPEED);
-  else if (steering.direction == 2) analogWrite(MOTOR_RPWM, MOTOR_SPEED);
+  if (steering.direction == 1) analogWrite(MOTOR_LPWM, steering.pwm);
+  else if (steering.direction == 2) analogWrite(MOTOR_RPWM, steering.pwm);
   appliedDirection = steering.direction;
+  appliedPWM = steering.pwm;
   steeringStatusPending = true;
 }
+
+void stopSerialSteering(uint8_t reason = 0) {
+  serialSteeringActive = false;
+  steering.stop(reason); // Invalidate old CAN commands before returning control.
+  steeringStatusPending = true;
+  applySteering();
+}
+void printSerialSteering() {
+  Serial.printf("Serial steering | %s | selected PWM=%u/255 | output PWM=%u/255\n",
+                serialSteeringActive ? (steering.direction == 1 ? "LEFT" : "RIGHT") : "STOP",
+                serialSteeringPWM, steering.pwm);
+}
+void serviceSerialSteering() {
+  // Character input only: no blocking readString/parseInt during live CAN work.
+  for (uint8_t n=0; n<16 && Serial.available(); ++n) {
+    const char key = (char)Serial.read();
+    if (key == '\r' || key == '\n') continue;
+    if (key == 's' || key == 'S' || key == ' ') {
+      stopSerialSteering(); printSerialSteering();
+    } else if (key == '+' || key == '-') {
+      const int next = (int)serialSteeringPWM + (key == '+' ? SERIAL_STEERING_STEP : -SERIAL_STEERING_STEP);
+      serialSteeringPWM = next < 0 ? 0 : next > 255 ? 255 : next;
+      if (serialSteeringActive) {
+        if (!serialSteeringPWM) stopSerialSteering();
+        else { steering.pwm = serialSteeringPWM; applySteering(); }
+      }
+      printSerialSteering();
+    } else if (key == 'a' || key == 'A' || key == 'd' || key == 'D') {
+      stopSerialSteering();
+      if (serialSteeringPWM) {
+        serialSteeringActive = true;
+        serialSteeringStartedAt = millis();
+        steering.direction = (key == 'a' || key == 'A') ? 1 : 2;
+        steering.pwm = serialSteeringPWM;
+        applySteering();
+      }
+      printSerialSteering();
+    }
+  }
+}
 void serviceSteering() {
-  const uint32_t previousOutages = steeringFeedback.outages;
   portENTER_CRITICAL(&steeringFeedbackMux);
   steeringFeedback = wirelessSteeringFeedback;
   portEXIT_CRITICAL(&steeringFeedbackMux);
-  // A new packet must not hide a timed-out link from a delayed loop iteration.
-  if (steering.direction && previousOutages != steeringFeedback.outages) {
-    steering.stop(5); steeringStatusPending = true;
+  // A local motor check is independent of the wireless angle sensor. Existing
+  // CAN-send fault handlers still stop it, and its run time is bounded here.
+  if (serialSteeringActive) {
+    if (!steering.direction) serialSteeringActive = false;
+    else if (millis() - serialSteeringStartedAt >= SERIAL_STEERING_RUN_MS) {
+      stopSerialSteering(4);
+      Serial.println("Serial steering STOP: 5 s limit; send a/d to run again.");
+    } else { applySteering(); return; }
   }
+  // Angle availability is reported separately from motor-speed control.
   if (steering.setFeedbackAvailable(steeringRadioReady && steeringFeedback.fresh(millis()))) steeringStatusPending = true;
   if (steering.tick(millis())) steeringStatusPending = true;
   applySteering();
@@ -115,13 +169,28 @@ uint32_t driveStatusAt=0, drivePeerAt=0, drivePeerSession=0;
 bool drivePeerNormal=false, drivePeerSeen=false;
 int acceleratorADC = 0;
 bool lastSendOK = false;
+unsigned long lastCanAttempt = 0;
+uint32_t remoteSteeringReceived=0, remoteSteeringAccepted=0, remoteSteeringRejected=0;
+bool lastSteeringStatusOK=false;
+
+void initializeCAN() {
+  lastCanAttempt = millis();
+  canReady = CAN.begin(MCP_ANY, CAN_SPEED, CAN_CRYSTAL) == CAN_OK &&
+             CAN.setMode(MCP_NORMAL) == CAN_OK;
+  if (canReady) {
+    steeringStatusPending = true;
+    Serial.println("CAN initialized | remote steering RX=0x110 TX=0x111 | angle optional");
+  } else {
+    Serial.println("ERROR: CAN initialization failed; retrying in 1 s. Serial steering is local only.");
+  }
+}
 
 void receiveSteering() {
   // Bound receive work so a busy bus cannot starve the motor timeout.
   for (uint8_t n=0; n<4 && canReady && CAN.checkReceive() == CAN_MSGAVAIL; ++n) {
     unsigned long id = 0; byte len = 0, data[8] = {};
     if (CAN.readMsgBuf(&id, &len, data) != CAN_OK) break;
-    if(id==DRIVE_SWITCH_STATUS_ID && len==8 && driveStatusValid(data,127)) {
+    if(id==DRIVE_SWITCH_STATUS_ID && len==8 && driveStatusValid(data,SWITCH_VALID_MASK)) {
       drivePeerNormal=(data[0]&0x7F)==0; drivePeerSession=driveRead32(data+4);
       drivePeerAt=millis(); drivePeerSeen=true;
     }
@@ -130,11 +199,19 @@ void receiveSteering() {
         drivePeerSeen && drivePeerNormal && drivePeerSession==driveGate.session && millis()-drivePeerAt<350,millis());
     }
     if (id == STEERING_COMMAND_ID) {
+      ++remoteSteeringReceived;
       serviceSteering();
-      const uint32_t before = steering.token;
-      steering.accept(data, len, millis());
-      if (before != steering.token) steeringStatusPending = true;
-      applySteering();
+      if (serialSteeringActive) {
+        // Local test owns direction/speed; a valid CAN STOP still takes effect.
+        if (len == 8 && data[0] == 0 && data[1] == 0) { stopSerialSteering(); ++remoteSteeringAccepted; }
+        else ++remoteSteeringRejected;
+      } else {
+        const uint32_t before = steering.token;
+        if (steering.accept(data, len, millis())) ++remoteSteeringAccepted;
+        else ++remoteSteeringRejected;
+        if (before != steering.token) steeringStatusPending = true;
+        applySteering();
+      }
     }
     serviceSteering();
   }
@@ -152,7 +229,8 @@ void sendSteeringStatus() {
   if (!canReady || (!steeringStatusPending && millis()-lastSteeringStatus < 100)) return;
   byte data[8]; steering.status(data);
   lastSteeringStatus = millis();
-  if (CAN.sendMsgBuf(STEERING_STATUS_ID, 0, 8, data) == CAN_OK) {
+  lastSteeringStatusOK = CAN.sendMsgBuf(STEERING_STATUS_ID, 0, 8, data) == CAN_OK;
+  if (lastSteeringStatusOK) {
     steeringStatusPending = false; ++txOK; lastTxAt=millis();
   } else {
     ++txFailed;
@@ -179,6 +257,7 @@ void setup() {
   steering.token = esp_random(); if (!steering.token) steering.token = 1;
   applySteering();
   Serial.begin(115200);
+  Serial.println("Steering serial test: a=LEFT d=RIGHT +=PWM+10 -=PWM-10 s/space=STOP; PWM 0..255, starts at 60, 5 s per a/d. Angle feedback not required for local test.");
   setupSteeringReceiver();
   Serial.println("Serial 115200 | CAN 500 kbps / MCP2515 8 MHz | SPI SCK=18 MISO=19 MOSI=23 CS=25");
   analogReadResolution(12);
@@ -189,26 +268,22 @@ void setup() {
 
   SPI.begin(CAN_SCK, CAN_MISO, CAN_MOSI, CAN_CS);
 
-  if (CAN.begin(MCP_ANY, CAN_SPEED, CAN_CRYSTAL) == CAN_OK &&
-      CAN.setMode(MCP_NORMAL) == CAN_OK) {
-    canReady = true;
-    Serial.println("CAN initialized. Waiting for accelerator input.");
-  } else {
-    Serial.println("ERROR: CAN initialization failed.");
-  }
+  initializeCAN();
 }
 
 void loop() {
+  if (!canReady && millis()-lastCanAttempt >= 1000) initializeCAN();
   acceleratorADC = analogRead(ACCELERATOR_PIN);
-  driveGate.tick(millis(),acceleratorADC<=DRIVE_IDLE_ADC);
+  driveGate.tick(millis());
   serviceSteering(); receiveSteering(); serviceSteering();
+  serviceSerialSteering(); serviceSteering();
   unsigned long now = millis();
 
   if (canReady && driveGate.phase!=1 && now - lastSend >= SEND_INTERVAL_MS) {
     lastSend = now;
 
     byte data[2];
-    const uint16_t transmittedADC=driveGate.phase ? 0 : acceleratorADC;
+    const uint16_t transmittedADC=driveGate.phase ? DRIVE_REST_ADC : acceleratorADC;
     data[0] = transmittedADC & 0xFF;
     data[1] = (transmittedADC >> 8) & 0xFF;
 
@@ -216,17 +291,23 @@ void loop() {
       (CAN.sendMsgBuf(ACCEL_CAN_ID, 0, 2, data) == CAN_OK);
     if (lastSendOK) { ++txOK; lastTxAt = millis(); }
     else { ++txFailed; if (steering.direction) { steering.stop(1); applySteering(); } }
-    if (lastSendOK) Serial.printf("[%lu ms] CAN TX ID=0x301 DLC=2 | accelerator ADC=%d/4095 | raw pin voltage estimate=%.3f V\n",
+    if (lastSendOK && now-lastPrint>=PRINT_INTERVAL_MS) Serial.printf("[%lu ms] CAN TX ID=0x301 DLC=2 | accelerator ADC=%d/4095 | raw pin voltage estimate=%.3f V\n",
                                   millis(), transmittedADC, throttleRawVoltage(transmittedADC));
   }
 
   if (now - lastPrint >= PRINT_INTERVAL_MS) {
     lastPrint = now;
+    Serial.printf("Remote steering | RX110=%lu accepted=%lu rejected=%lu | TX111=%s | dir=%u PWM=%u token=%lu owner=%s\n",
+      (unsigned long)remoteSteeringReceived,(unsigned long)remoteSteeringAccepted,(unsigned long)remoteSteeringRejected,
+      lastSteeringStatusOK ? "OK" : "FAILED/NOT SENT",steering.direction,steering.pwm,(unsigned long)steering.token,
+      serialSteeringActive ? "SERIAL" : "CAN");
 
     Serial.printf("[%lu ms] Node 1 | TX OK=%lu failed=%lu | ", now, txOK, txFailed);
     if (steeringFeedback.fresh(now)) Serial.printf("Steering=%.2f deg seq=%lu age=%lu ms | ", steeringFeedback.angle, (unsigned long)steeringFeedback.sequence, (unsigned long)(now-steeringFeedback.receivedAt));
     else Serial.printf("Steering angle UNAVAILABLE (%s) | ", steeringRadioReady ? "waiting/stale" : "radio failed");
     Serial.printf("IMU accepted=%lu invalid=%lu replayed=%lu | ", (unsigned long)steeringFeedback.accepted, (unsigned long)steeringFeedback.invalid, (unsigned long)steeringFeedback.replayed);
+    Serial.printf("IMU horn=%s | ", steeringFeedback.fresh(now) && steeringFeedback.hornAvailable ?
+      (steeringFeedback.hornPressed ? "PRESSED" : "RELEASED") : "UNAVAILABLE");
     float voltage = throttleRawVoltage(acceleratorADC);
 
     Serial.print("Accelerator ADC: ");
@@ -243,7 +324,7 @@ void loop() {
     }
   }
 
-  driveGate.tick(millis(),acceleratorADC<=DRIVE_IDLE_ADC);
+  driveGate.tick(millis());
   sendDriveGateStatus();
   serviceSteering(); sendSteeringAngle(); serviceSteering(); sendSteeringStatus(); serviceSteering();
   delay(1);

@@ -96,6 +96,45 @@
         }
       },
       "updatedAt": "2026-10-20T00:00:00+05:30"
+    },
+    "/control": {
+      "targetKind": "new-ui",
+      "projectId": "1f9fec98-cdb4-4b04-a47e-9abde3f93bba",
+      "activeDraftId": "f5b0c18a-70b4-42c7-9aea-7dfc0804eebb",
+      "sourceTarget": "/",
+      "sourceDraftId": "30d505cc-6133-4cd4-9d73-92eb1f5f8206",
+      "designSystemPath": ".superdesign/design-system.md",
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        "dashboard/src/index.css",
+        "dashboard/src/App.jsx",
+        "dashboard/src/App.css",
+        "dashboard/src/SteeringPanel.jsx",
+        "dashboard/src/JoystickPanel.jsx",
+        "dashboard/src/joystickModel.js",
+        "dashboard/src/joystickClient.js",
+        "dashboard/src/ButtonControls.jsx"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "a33b1eee224c503eddcf883a9c973acaf8c896b3eee6191882f5f222563e5954",
+        "dashboard/src/index.css": "7815137706b78bdddebd2daf2086d20b7b8272f1e3136341e0f9da7251098161",
+        "dashboard/src/App.jsx": "4e8fd37e70070803858c6c54b53dd6c8bb57fb37055b6468b8e098645e508ccc",
+        "dashboard/src/App.css": "40a9ed58f6ac077218edca16296675ed8953b4a1dc6f4abff17bc3a1f5a554e0",
+        "dashboard/src/SteeringPanel.jsx": "1ac0ba78ac2e2779d0b27757b53affac8638e98dd29a28754a76ab304fb10a2c",
+        "dashboard/src/JoystickPanel.jsx": "22c72008e7e2270d1a47b62874b1568763d91ebe1a611e478461f1578b1027c9",
+        "dashboard/src/joystickModel.js": "c7ff6e6dc27caed6ef0e5307f8672fc0adba81e1202f66e668aaef4dea2587eb",
+        "dashboard/src/joystickClient.js": "a35709f5f83e805ed59e4dd3d803174855abec11b45b31a363167b2e4b7c510f",
+        "dashboard/src/ButtonControls.jsx": "b5d7a64b7e5ba96dd3d9700210921abe309068d26a47300e5515dfb208cffb19"
+      },
+      "components": [],
+      "drafts": {
+        "f5b0c18a-70b4-42c7-9aea-7dfc0804eebb": {
+          "title": "SRT joystick remote control",
+          "visualDirection": "Black/orange circular 360-degree motor-speed joystick; forward/reverse throttle and left/right PWM; requested/applied 0\u2013255, limits and fixed STOP. Actual implemented UI imported after browser verification.",
+          "currentVersion": 2
+        }
+      },
+      "updatedAt": "2026-10-23T01:55:30.028160+05:30"
     }
   }
 }

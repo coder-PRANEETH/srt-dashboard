@@ -3,12 +3,12 @@
  * CAN ID: 0x300 | DLC: 1
  *
  * Bit 0: Cruise
- * Bit 1: ECO
- * Bit 2: Reverse
- * Bit 3: Hill Hold
+ * Bit 1: HillHold
+ * Bit 2: Autonomous
+ * Bit 3: Remote mode
  * Bit 4: Horn
- * Bit 5: Headlight
- * Bit 6: Autonomous Mode
+ * Bit 5: Reverse
+ * Bits 6-7: Reserved (zero)
  *
  * Switch ON = GPIO connected to GND.
  */
@@ -23,7 +23,6 @@
 #define DPDT2_B  14
 #define PUSH_BTN 26
 #define SPST1    33
-#define SPST2    32
 
 #define CAN_SCK  18
 #define CAN_MISO 19
@@ -38,19 +37,19 @@ const unsigned long DEBOUNCE_MS = 25;
 const unsigned long SEND_INTERVAL_MS = 1000;
 const unsigned long PRINT_INTERVAL_MS = 250;
 
-const byte switchPins[7] = {
+const byte switchPins[SWITCH_COUNT] = {
   DPDT1_A, DPDT1_B, DPDT2_A, DPDT2_B,
-  PUSH_BTN, SPST1, SPST2
+  PUSH_BTN, SPST1
 };
 
-const char* switchNames[7] = {
-  "Cruise", "ECO", "Reverse", "Hill Hold",
-  "Horn", "Headlight", "Autonomous"
+const char* switchNames[SWITCH_COUNT] = {
+  "Cruise", "HillHold", "Autonomous", "Remote mode",
+  "Horn", "Reverse"
 };
 
-bool rawState[7];
-bool stableState[7];
-unsigned long rawChangedAt[7];
+bool rawState[SWITCH_COUNT];
+bool stableState[SWITCH_COUNT];
+unsigned long rawChangedAt[SWITCH_COUNT];
 
 MCP_CAN CAN(CAN_CS);
 RemoteDriveGate driveGate;
@@ -66,7 +65,7 @@ unsigned long lastAttempt = 0;
 byte buildPayload() {
   byte payload = 0;
 
-  for (byte i = 0; i < 7; i++) {
+  for (byte i = 0; i < SWITCH_COUNT; i++) {
     if (stableState[i]) {
       payload |= (1U << i);
     }
@@ -80,7 +79,7 @@ void receiveDriveGate() {
     unsigned long id=0; byte len=0,data[8]={};
     if(CAN.readMsgBuf(&id,&len,data)!=CAN_OK) break;
     if(id==DRIVE_GATE_ID) {
-      const bool releaseMatches=bool(buildPayload()&4)==driveGate.reverse;
+      const bool releaseMatches=bool(buildPayload()&SWITCH_REVERSE)==driveGate.reverse;
       driveGate.accept(data,len,3,data[0]==1 || releaseMatches,false,millis());
     }
   }
@@ -93,7 +92,7 @@ void sendDriveGateStatus() {
   else { ++txFailed; driveGate.lock(); }
 }
 void printSwitchStates(byte payload) {
-  for (byte i = 0; i < 7; ++i) {
+  for (byte i = 0; i < SWITCH_COUNT; ++i) {
     if (i) Serial.print(" | ");
     Serial.print(switchNames[i]); Serial.print(": ");
     Serial.print((payload & (1U << i)) ? "ON" : "OFF");
@@ -121,10 +120,10 @@ void setup() {
 
   Serial.println("\n=== NODE 3: SWITCH SENDER ===");
 
-  Serial.println("Switch GPIOs: cruise=4 ECO=5 reverse=13 hill=14 horn=26 headlight=33 autonomous=32; LOW=ON");
+  Serial.println("Switch GPIOs: cruise=4 hillHold=5 autonomous=13 remoteMode=14 horn=26 reverse=33; LOW=ON");
   unsigned long now = millis();
 
-  for (byte i = 0; i < 7; i++) {
+  for (byte i = 0; i < SWITCH_COUNT; i++) {
     pinMode(switchPins[i], INPUT_PULLUP);
     stableState[i] = (digitalRead(switchPins[i]) == LOW);
     rawState[i] = stableState[i];
@@ -138,7 +137,7 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  for (byte i = 0; i < 7; i++) {
+  for (byte i = 0; i < SWITCH_COUNT; i++) {
     bool current = (digitalRead(switchPins[i]) == LOW);
 
     if (current != rawState[i]) {

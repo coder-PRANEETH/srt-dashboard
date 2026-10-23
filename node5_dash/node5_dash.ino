@@ -26,6 +26,9 @@ Shared CAN connection (classic ESP32 + MCP2515):
   A successful CAN startup confirms SPI init; RX needs another CAN node.
 */
 
+// Keep the complete bounded /api/can-log, but do not block HTTP command leases
+// on UART frame printing when simultaneous traction/steering fills the bus.
+#define CAN_FRAME_SERIAL_LOG 0
 #include "CanCommon.h"
 #include "ThrottleCalibration.h"
 #include "SteeringControl.h"
@@ -45,18 +48,25 @@ struct Sample { uint8_t bytes[8] = {}; uint8_t len = 0; uint32_t at = 0, receive
 SteeringRelay steeringRelay;
 struct DriveHost {
   uint32_t token=1, session=0, lastHttp=0, started=0, lastTx=0, settledAt=0, stoppedAt=0;
-  uint16_t httpSeq=0, gateSeq=0, adc=0;
-  uint8_t percent=0;
-  bool held=false, paired=false, reverse=false, wireReverse=false, directionSet=false;
+  uint16_t httpSeq=0, gateSeq=0, pwmSeq=0, adc=0;
+  uint8_t percent=0, pwm=0;
+  bool held=false, paired=false, reverse=false, wireReverse=false, directionSet=false, pwmMode=false;
+  bool steeringOwned=false, shiftOnly=false, shiftSent=false;
+  uint8_t shiftPhase=1;
+  uint32_t shiftAckCount=0, completedShiftToken=0;
+  bool completedReverse=false;
   const char *reason="";
 } drive;
+bool joystickSteerStopping=false;
+uint32_t joystickStoppedNodeToken=0;
 void serviceDrive();
-const uint16_t ids[] = {0x121,0x122,0x111,0x100,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x400,0x401,0x500,0x501};
+void stopDrive(const char *reason);
+const uint16_t ids[] = {0x121,0x122,0x124,0x111,0x100,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x400,0x401,0x500,0x501};
 Sample samples[sizeof(ids)/sizeof(ids[0])];
 struct NodeState { uint8_t status = 0, error = 0, tx = 0, rx = 0; uint32_t at = 0; bool seen = false; } nodes[6];
 struct LogFrame { uint32_t seq, ms, id; uint8_t len, bytes[8]; bool tx=false; } logFrames[64];
 uint8_t logNext = 0, logCount = 0;
-uint32_t frameCount = 0, lastBeat = 0, malformedFrames = 0, unknownFrames = 0;
+uint32_t frameCount = 0, lastBeat = 0, malformedFrames = 0, unknownFrames = 0, lastCanAttempt = 0;
 bool fsReady = false;
 float gpsSpeedKmh = NAN, prevLat = NAN, prevLon = NAN;
 uint32_t prevGpsAt = 0;
@@ -102,12 +112,12 @@ void readCan() {
        (data[0] < 90 || be16(data+1) == 0) && (data[3] < 180 || be16(data+4) == 0))));
     const bool validPitch = id != 0x500 || (data[0] <= 1 && data[2] <= 100 && data[3] <= 1 && (!data[3] || data[1] <= 180));
     const bool validMotor = id != 0x201 || (data[0]<=1 && data[1]<=1 && data[2]<=1 && data[3]<=100 &&
-      data[4]<=1 && data[5]<=1 && data[6]<=1 && data[7]<=8);
+      data[4]<=1 && data[5]<=1 && data[6]<=1 && data[7]<=9);
     const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095) &&
-      (id != 0x300 || !(data[0]&0x80)) && (id != 0x401 || data[0]<=1) && validGps && validPitch && validMotor &&
+      (id != 0x300 || !(data[0]&~SWITCH_VALID_MASK)) && (id != 0x401 || data[0]<=1) && validGps && validPitch && validMotor &&
       (id != STEERING_ANGLE_ID || steeringAngleFrameValid(data)) &&
-      ((id != 0x121 && id != 0x122) || driveStatusValid(data,id==0x121 ? 4095 : 127)) &&
-      (id != STEERING_STATUS_ID || (data[0] <= 2 && data[1] == (data[0] ? STEERING_PWM : 0) && data[2] <= 5 && data[3] == 1));
+      ((id != 0x121 && id != 0x122 && id != 0x124) || driveStatusValid(data,id==0x121 ? 4095 : id==0x122 ? SWITCH_VALID_MASK : 255)) &&
+      (id != STEERING_STATUS_ID || steeringOutputValid(data));
     if (s) { ++s->received; if (!validPayload) { ++s->invalid; ++malformedFrames; } }
     else if (id == 0x600) { if (!validHeartbeat) ++malformedFrames; }
     else ++unknownFrames;
@@ -192,9 +202,9 @@ void sendVehicle() {
   j += ",\"pitchValid\":" + maybeBool(h, hill->bytes[3]);
   j += ",\"holdPct\":" + maybeNumber(h, hill->bytes[2]);
   j += ",\"summonActive\":" + maybeBool(fresh(summon, 250), summon->bytes[4]);
-  const char *names[] = {"cruise","eco","reverse","hill","horn","headlight","autonomous"};
+  const char *names[] = {"cruise","hill","autonomous","remoteMode","horn","reverse"};
   j += ",\"switches\":{";
-  for (uint8_t n=0; n<7; ++n) { if (n) j += ','; j += "\"" + String(names[n]) + "\":" + maybeBool(s, sw->bytes[0] & (1U << n)); }
+  for (uint8_t n=0; n<SWITCH_COUNT; ++n) { if (n) j += ','; j += "\"" + String(names[n]) + "\":" + maybeBool(s, sw->bytes[0] & (1U << n)); }
   j += "},\"nodes\":[";
   for (uint8_t n=1; n<=5; ++n) {
     if (n>1) j += ',';
@@ -229,9 +239,12 @@ void sendVehicle() {
   j += ",\"pwm\":" + maybeNumber(steeringFresh, st->bytes[1]);
   j += ",\"reason\":" + maybeNumber(steeringFresh, st->bytes[2]);
   j += ",\"ageMs\":" + (st->seen ? String(millis()-st->at) : "null") + "}";
-  const Sample *dp=sampleFor(0x121), *ds=sampleFor(0x122);
+  const Sample *dp=sampleFor(0x121), *ds=sampleFor(0x122), *dm=sampleFor(0x124);
   j+=",\"remoteDrive\":{\"active\":"+String(drive.held?"true":"false")+",\"adc\":"+String(drive.adc);
   j+=",\"reverse\":"+String(drive.wireReverse?"true":"false")+",\"reason\":\""+String(drive.reason)+"\"";
+  j+=",\"pwmMode\":"+String(drive.pwmMode?"true":"false")+",\"pwm\":"+String(drive.pwm);
+  j+=",\"motorGate\":"+maybeNumber(fresh(dm,350),dm->bytes[0]&3);
+  j+=",\"appliedPwm\":"+maybeNumber(fresh(dm,350),le16(dm->bytes+1));
   j+=",\"pedalAdc\":"+maybeNumber(fresh(dp,350),le16(dp->bytes+1));
   j+=",\"switchMask\":"+maybeNumber(fresh(ds,350),ds->bytes[1]);
   j+=",\"pedalGate\":"+maybeNumber(fresh(dp,350),dp->bytes[0]&3);
@@ -319,8 +332,8 @@ void sendDiagnostics() {
   j += ",\"lastRxAgeMs\":" + (canRxTotal ? String(millis() - canLastRxAt) : "null");
   j += ",\"malformedFrames\":" + String(malformedFrames) + ",\"unknownFrames\":" + String(unknownFrames);
   j += ",\"signals\":[";
-  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500,0x111,0x121,0x122,STEERING_ANGLE_ID};
-  const uint16_t timeouts[] = {501,3001,3000,3000,1000,600,350,350,STEERING_FEEDBACK_TIMEOUT_MS};
+  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500,0x111,0x121,0x122,STEERING_ANGLE_ID,0x124};
+  const uint16_t timeouts[] = {501,3001,3000,3000,1000,600,350,350,STEERING_FEEDBACK_TIMEOUT_MS,350};
   for (uint8_t n=0; n<sizeof(signalIds)/sizeof(signalIds[0]); ++n) {
     const Sample *s = sampleFor(signalIds[n]);
     if (n) j += ',';
@@ -340,9 +353,14 @@ void sendDashboard() {
 // remains public to clients on the dashboard AP; no GET can actuate a motor.
 bool steeringNodeReady() {
   const Sample *s = sampleFor(STEERING_STATUS_ID);
-  const Sample *angle = sampleFor(STEERING_ANGLE_ID);
-  return canReady && fresh(s, 600) && s->bytes[3] == 1 &&
-    fresh(angle, STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(angle->bytes, millis()-angle->at);
+  return canReady && fresh(s, 600) && steeringOutputValid(s->bytes);
+}
+const char *steeringLinkMessage() {
+  const Sample *s=sampleFor(STEERING_STATUS_ID);
+  if (!canReady) return "DASHBOARD CAN NOT READY";
+  if (!s->seen) return s->invalid ? "NODE 1 STATUS FORMAT INVALID" : "WAITING FOR NODE 1 CAN STATUS";
+  if (!fresh(s,600)) return "NODE 1 CAN STATUS STALE";
+  return "";
 }
 void stopSteeringRelay() {
   steeringRelay.stop();
@@ -352,8 +370,10 @@ void stopSteeringRelay() {
 void serviceSteeringRelay() {
   const Sample *s = sampleFor(STEERING_STATUS_ID);
   if (steeringRelay.direction && (!steeringNodeReady() || steeringRead32(s->bytes+4) != steeringRelay.nodeToken)) {
-    stopSteeringRelay();
+    if(drive.held && drive.steeringOwned) stopDrive("STEERING OUTPUT LINK LOST");
+    else stopSteeringRelay();
   } else if (steeringRelay.tick(millis())) {
+    if(drive.held && drive.steeringOwned) { stopDrive("STEERING COMMAND EXPIRED"); return; }
     const uint8_t data[8] = {};
     sendLoggedCan(STEERING_COMMAND_ID, data);
   }
@@ -366,6 +386,9 @@ void sendSteeringState() {
   const bool angleLive = fresh(angle, STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(angle->bytes, millis()-angle->at);
   const bool ready = steeringNodeReady();
   String j = "{\"ready\":" + String(ready ? "true" : "false");
+  j += ",\"controlVersion\":3,\"angleRequired\":false,\"canReady\":" + String(canReady ? "true" : "false");
+  j += ",\"nodeSeen\":" + String(s->seen ? "true" : "false") + ",\"nodeInvalid\":" + String(s->invalid);
+  j += ",\"message\":\"" + String(steeringLinkMessage()) + "\"";
   j += ",\"token\":" + String(steeringRelay.token);
   j += ",\"direction\":" + (statusLive ? String(s->bytes[0]) : "null");
   j += ",\"pwm\":" + (statusLive ? String(s->bytes[1]) : "null");
@@ -416,81 +439,123 @@ void handleSteeringCommand() {
 }
 
 bool driveCapable() {
-  return canReady && fresh(sampleFor(0x121),250) && fresh(sampleFor(0x122),250);
+  return canReady && fresh(sampleFor(0x121),250) && fresh(sampleFor(0x122),250) &&
+    fresh(sampleFor(DRIVE_MOTOR_STATUS_ID),250) && fresh(sampleFor(0x201),250);
 }
 bool drivePedalIdle() { return driveCapable() && le16(sampleFor(0x121)->bytes+1)<=DRIVE_IDLE_ADC; }
 bool driveGateAt(uint16_t id, uint8_t phase) {
-  const Sample *s=sampleFor(id);
+  const Sample *s = sampleFor(id);
   return fresh(s,250) && (s->bytes[0]&3)==phase && driveRead32(s->bytes+4)==drive.session;
 }
 bool driveReady() {
-  return drivePedalIdle() && (drive.held || ((sampleFor(0x121)->bytes[0]&3)!=1 && (sampleFor(0x122)->bytes[0]&3)!=1));
+  return driveCapable() && (drive.held || (drivePedalIdle() &&
+    (sampleFor(0x121)->bytes[0]&3)!=1 && (sampleFor(0x122)->bytes[0]&3)!=1 &&
+    (sampleFor(0x124)->bytes[0]&3)!=1));
 }
-bool driveCanShift() { return !drive.held && (!drive.session || millis()-drive.stoppedAt>=DRIVE_SETTLE_MS); }
+bool driveAppliedReverse() { return (sampleFor(0x124)->bytes[0]&0x80)!=0; }
+bool driveManualMode() {
+  return driveCapable() && (sampleFor(0x121)->bytes[0]&3)==0 &&
+    (sampleFor(0x122)->bytes[0]&3)==0 && (sampleFor(0x124)->bytes[0]&3)==0;
+}
+bool driveCanShift() {
+  return !drive.held && driveReady() && le16(sampleFor(0x124)->bytes+1)<=DRIVE_REST_PWM;
+}
 bool sendDriveGate(uint8_t op) {
-  uint8_t data[8]={op,(uint8_t)drive.wireReverse,0,0,0,0,0,0};
+  uint8_t data[8]={op,(uint8_t)(drive.wireReverse | 2),0,0,0,0,0,0};
   driveWrite32(data+2,drive.session); ++drive.gateSeq;
   data[6]=drive.gateSeq; data[7]=drive.gateSeq>>8;
   return sendLoggedCan(DRIVE_GATE_ID,data);
 }
-bool sendDriveAdc(uint16_t adc) {
-  const uint8_t data[2]={(uint8_t)adc,(uint8_t)(adc>>8)};
-  const bool sent=sendLoggedCan(0x301,data); drive.adc=sent ? adc : 0; return sent;
+bool sendDrivePWM(uint8_t pwm) {
+  const uint16_t seq=++drive.pwmSeq;
+  uint8_t data[8]={pwm,(uint8_t)drive.wireReverse,(uint8_t)seq,(uint8_t)(seq>>8),0,0,0,0};
+  driveWrite32(data+4,drive.session);
+  return sendLoggedCan(DRIVE_PWM_ID,data);
+}
+void beginDrive(bool steeringOwned,bool reverse,bool shiftOnly=false) {
+  drive.completedShiftToken=0;
+  drive.pwmMode=true; drive.steeringOwned=steeringOwned; drive.shiftOnly=shiftOnly;
+  drive.session=drive.token; drive.gateSeq=drive.pwmSeq=0; drive.pwm=drive.percent=0;
+  drive.started=millis(); drive.paired=false; drive.held=true; drive.reason="";
+  drive.wireReverse=driveAppliedReverse();
+  drive.reverse=reverse; drive.directionSet=true; drive.lastTx=millis()-50;
+  drive.shiftPhase=1; drive.shiftSent=false;
 }
 void stopDrive(const char *reason="") {
   const bool owned=drive.paired || driveGateAt(0x121,1) || driveGateAt(0x121,2);
   if(drive.held) drive.stoppedAt=millis();
-  drive.held=false; drive.paired=false; drive.percent=0; drive.adc=0; drive.reason=reason;
+  drive.held=false; drive.paired=false; drive.percent=0; drive.pwm=0; drive.adc=0; drive.reason=reason;
+  drive.shiftOnly=false; drive.shiftPhase=0; drive.shiftSent=false;
   if(++drive.token==0) ++drive.token;
-  if(drive.session) { if(owned) sendDriveAdc(0); sendDriveGate(0); }
+  if(drive.session) { if(owned) sendDrivePWM(0); sendDriveGate(0); }
+  if(drive.steeringOwned) { stopSteeringRelay(); joystickSteerStopping=false; }
 }
-void serviceDrive() {
+void expireDriveCommand() {
   const uint32_t now=millis();
   if(drive.held && (now-drive.lastHttp>=DRIVE_LEASE_MS || now-drive.started>=DRIVE_HOLD_MS)) stopDrive("RELEASE & RETRY");
-  if(drive.held && !drivePedalIdle()) stopDrive("PEDAL / LINK FAULT");
+  if(drive.held && (!driveCapable() || (drive.steeringOwned && !steeringNodeReady()))) stopDrive("LINK FAULT");
+}
+void serviceDrive() {
+  expireDriveCommand();
+  const uint32_t now=millis();
   if(!drive.session || now-drive.lastTx<50) return;
   drive.lastTx=now;
   if(!drive.held) {
-    // Nodes latch zero/held direction on expiry. Restore switches before pedal.
     const bool pedalNormal=fresh(sampleFor(0x121),250) && (sampleFor(0x121)->bytes[0]&3)==0;
     const bool switchesNormal=fresh(sampleFor(0x122),250) && (sampleFor(0x122)->bytes[0]&3)==0;
-    if(pedalNormal && switchesNormal) { drive.session=0; return; }
-    // A rejected partial claim must not inject zeros over the normal pedal sender.
-    if(!pedalNormal) sendDriveAdc(0);
+    const bool motorNormal=fresh(sampleFor(0x124),250) && (sampleFor(0x124)->bytes[0]&3)==0;
+    if(pedalNormal && switchesNormal && motorNormal) { drive.session=0; return; }
+    if(!motorNormal) sendDrivePWM(0);
     sendDriveGate(0);
-    if(drivePedalIdle() && now-drive.stoppedAt>=DRIVE_SETTLE_MS && bool(sampleFor(0x122)->bytes[1]&4)==drive.wireReverse) {
+    if(drivePedalIdle() && bool(sampleFor(0x122)->bytes[1]&SWITCH_REVERSE)==drive.wireReverse) {
       if(driveGateAt(0x122,2)) sendDriveGate(2);
       else if(driveGateAt(0x122,0)) sendDriveGate(3);
     }
     return;
   }
-  const bool paired=driveGateAt(0x121,1) && driveGateAt(0x122,1);
+  const bool paired=driveGateAt(0x121,1) && driveGateAt(0x122,1) && driveGateAt(0x124,1);
   if(drive.paired && !paired) { stopDrive("HANDOFF LOST"); return; }
   if(!paired && now-drive.started>=600) { stopDrive("HANDOFF FAILED"); return; }
-  if(paired && !drive.paired) { drive.paired=true; drive.settledAt=now; }
-  // First hold the old direction at zero; then switch and settle again.
-  if(paired && drive.wireReverse!=drive.reverse && now-drive.settledAt>=DRIVE_SETTLE_MS) {
-    drive.wireReverse=drive.reverse; drive.settledAt=now;
+  if(paired && !drive.paired) { drive.paired=true; drive.shiftPhase=1; drive.shiftSent=false; }
+  const Sample *motor=sampleFor(0x124), *output=sampleFor(0x201);
+  // A direction request must first get a NEW applied-idle acknowledgement.
+  if(!drive.shiftPhase && drive.wireReverse!=drive.reverse) { drive.shiftPhase=1; drive.shiftSent=false; }
+  const bool newIdleAck=paired && drive.shiftSent && motor->received!=drive.shiftAckCount &&
+    le16(motor->bytes+1)<=DRIVE_REST_PWM && driveAppliedReverse()==drive.wireReverse;
+  if(newIdleAck) {
+    if(drive.wireReverse!=drive.reverse) {
+      drive.wireReverse=drive.reverse; drive.shiftPhase=2; drive.shiftSent=false;
+    } else drive.shiftPhase=0;
   }
   if(!sendDriveGate(1)) { stopDrive("CAN SEND FAILED"); return; }
   if(!paired) return;
-  const uint8_t switches[1]={driveSwitchMask(sampleFor(0x122)->bytes[1],drive.wireReverse)};
-  const bool directionAck=bool(sampleFor(0x121)->bytes[0]&0x80)==drive.wireReverse && bool(sampleFor(0x122)->bytes[0]&0x80)==drive.wireReverse;
-  const uint16_t adc=directionAck && drive.wireReverse==drive.reverse && now-drive.settledAt>=DRIVE_SETTLE_MS ? (uint32_t)drive.percent*4095/100 : 0;
-  if(!sendLoggedCan(0x300,switches) || !sendDriveAdc(adc)) stopDrive("CAN SEND FAILED");
+  const bool ready=output->bytes[7]==0 && bool(output->bytes[2])==drive.wireReverse &&
+    driveAppliedReverse()==drive.wireReverse;
+  const uint8_t demand=!drive.shiftPhase && ready ? drive.pwm : 0;
+  if(drive.shiftPhase && !drive.shiftSent) {
+    drive.shiftAckCount=motor->received; drive.shiftSent=true;
+  }
+  if(!sendDrivePWM(demand)) { stopDrive("CAN SEND FAILED"); return; }
+  // The reverse button renews a zero-demand transaction until the relay ACK.
+  if(drive.shiftOnly && !drive.shiftPhase && ready) {
+    drive.completedShiftToken=drive.token; drive.completedReverse=drive.reverse; stopDrive();
+  }
 }
 void sendDriveState() {
   readCan(); serviceDrive();
   const bool capable=driveCapable();
-  if(capable && !drive.directionSet && !drive.session) drive.reverse=bool(sampleFor(0x122)->bytes[1]&4);
+  if(!drive.held && driveManualMode()) drive.reverse=driveAppliedReverse();
   const char *message=drive.reason;
-  if(!capable) message="NODES 1 / 3 UNAVAILABLE";
-  else if(!drivePedalIdle()) message="RELEASE PEDAL";
-  else if(drive.held && !drive.adc) message="ARMING";
-  else if(!drive.held && drive.session && bool(sampleFor(0x122)->bytes[1]&4)!=drive.wireReverse) message="MATCH REVERSE SWITCH";
+  if(!capable) message="WAITING FOR CONTROL NODES";
+  else if(!drive.held && !drivePedalIdle()) message="RELEASE PEDAL";
+  else if(drive.held && !drive.paired) message="TAKING REMOTE CONTROL";
+  else if(drive.held && drive.shiftPhase) message="WAITING FOR IDLE / DIRECTION ACK";
+  else if(!drive.held && drive.session && bool(sampleFor(0x122)->bytes[1]&SWITCH_REVERSE)!=drive.wireReverse) message="MATCH REVERSE SWITCH FOR MANUAL";
   String j="{\"ready\":"+String(driveReady()?"true":"false")+",\"token\":"+String(drive.token);
-  j+=",\"held\":"+String(drive.held?"true":"false")+",\"adc\":"+String(drive.adc)+",\"percent\":"+String(drive.percent);
-  j+=",\"reverse\":"+String(drive.reverse?"true":"false")+",\"canShift\":"+String(driveCanShift()?"true":"false");
+  j+=",\"held\":"+String(drive.held?"true":"false")+",\"adc\":0,\"percent\":"+String(drive.percent);
+  j+=",\"throttlePwm\":"+String(drive.pwm)+",\"appliedThrottlePwm\":"+maybeNumber(capable,le16(sampleFor(0x124)->bytes+1));
+  j+=",\"reverse\":"+String(drive.reverse?"true":"false")+",\"appliedReverse\":"+(capable?String(driveAppliedReverse()?"true":"false"):"null");
+  j+=",\"shifting\":"+String(drive.held && drive.shiftPhase?"true":"false")+",\"canShift\":"+String(driveCanShift()?"true":"false");
   j+=",\"message\":\""+String(message)+"\",\"timeoutMs\":350,\"holdMs\":5000}";
   server.sendHeader("Cache-Control","no-store"); server.send(200,"application/json",j);
 }
@@ -499,35 +564,39 @@ void handleDriveCommand() {
   if(server.header("X-SRT-Control")!="1" || (server.hasHeader("Origin") && server.header("Origin")!="http://"+server.hostHeader())) {
     server.send(403,"application/json","{\"error\":\"Same-origin control required\"}"); return;
   }
-  readCan(); serviceDrive();
+  readCan(); expireDriveCommand();
   const String action=server.arg("action");
   if(action=="stop") { stopDrive(); sendDriveState(); return; }
   uint32_t token=0,seq=0,percent=0,reverse=0;
-  if(!steeringDecimal(server.arg("token"),token) || (action!="throttle" && action!="reverse") ||
-    (action=="throttle" && (!steeringDecimal(server.arg("seq"),seq) || !seq || seq>65535 || !steeringDecimal(server.arg("percent"),percent) || percent<1 || percent>100)) ||
+  if(!steeringDecimal(server.arg("token"),token) || !steeringDecimal(server.arg("seq"),seq) || !seq || seq>65535 ||
+    (action!="throttle" && action!="reverse") ||
+    (action=="throttle" && (!steeringDecimal(server.arg("percent"),percent) || percent<1 || percent>100)) ||
     (action=="reverse" && (!steeringDecimal(server.arg("reverse"),reverse) || reverse>1))) {
     stopDrive("INVALID COMMAND"); server.send(400,"application/json","{\"error\":\"Invalid drive command\"}"); return;
   }
-  if(token!=drive.token || !driveReady() || (action=="reverse" && !driveCanShift())) {
-    stopDrive("RELEASE & RETRY"); server.send(409,"application/json","{\"error\":\"Release and retry\"}"); return;
-  }
-  if(action=="reverse") {
-    drive.reverse=reverse; drive.directionSet=true; drive.reason="";
-    if(++drive.token==0) ++drive.token;
-    sendDriveState(); return;
-  }
-  if(drive.held && (seq<=drive.httpSeq || percent!=drive.percent)) {
+  const bool shifting=action=="reverse";
+  if(shifting && !drive.held && token==drive.completedShiftToken && bool(reverse)==drive.completedReverse &&
+      driveCapable() && driveAppliedReverse()==bool(reverse)) { sendDriveState(); return; }
+  if(token!=drive.token || !driveReady() || (drive.held &&
+      (drive.steeringOwned || drive.shiftOnly!=shifting || seq<=drive.httpSeq)) ||
+      (!drive.held && shifting && !driveCanShift())) {
     stopDrive("RELEASE & RETRY"); server.send(409,"application/json","{\"error\":\"Release and retry\"}"); return;
   }
   if(!drive.held) {
-    drive.session=drive.token; drive.gateSeq=0; drive.started=millis(); drive.paired=false;
-    const Sample *sw=sampleFor(0x122);
-    drive.wireReverse=(sw->bytes[0]&3)==2 ? bool(sw->bytes[0]&0x80) : bool(sw->bytes[1]&4);
-    drive.percent=percent; drive.held=true; drive.reason="";
-    drive.lastTx=millis()-50;
+    // A button throttle request carries no direction. After manual handback,
+    // use the latest applied relay direction even if the browser's last poll
+    // preceded a physical switch change. A locked remote choice stays latched.
+    const bool direction=shifting ? bool(reverse) : driveManualMode() ? driveAppliedReverse() : drive.reverse;
+    beginDrive(false,direction,shifting);
   }
+  else if(shifting && drive.reverse!=bool(reverse)) {
+    stopDrive("RELEASE & RETRY"); server.send(409,"application/json","{\"error\":\"Direction changed during shift\"}"); return;
+  }
+  drive.percent=percent; drive.pwm=shifting?0:(percent*255+50)/100;
   drive.httpSeq=seq; drive.lastHttp=millis(); sendDriveState();
 }
+
+#include "JoystickHost.h"
 
 void setup() {
   Serial.begin(115200);
@@ -536,11 +605,14 @@ void setup() {
   fsReady = LittleFS.begin(false);
   if (!fsReady) Serial.println("LittleFS unavailable: upload data/");
   if (!canBegin()) Serial.println("CAN unavailable: check MCP2515 wiring/crystal");
+  lastCanAttempt=millis();
   WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID, AP_PASS); WiFi.setSleep(false);
   const char *controlHeaders[] = {"X-SRT-Control", "Origin"};
   server.collectHeaders(controlHeaders, 2);
   server.on("/api/drive", HTTP_GET, sendDriveState);
   server.on("/api/drive", HTTP_POST, handleDriveCommand);
+  server.on("/api/joystick", HTTP_GET, sendJoystickState);
+  server.on("/api/joystick", HTTP_POST, handleJoystickCommand);
   server.on("/api/steering", HTTP_GET, sendSteeringState);
   server.on("/api/steering", HTTP_POST, handleSteeringCommand);
   server.on("/api/data", sendSpeed); server.on("/api/gps", sendGps);
@@ -548,6 +620,7 @@ void setup() {
   server.on("/api/diagnostics", sendDiagnostics);
   server.on("/status", sendDashboard); server.on("/status/", sendDashboard);
   server.on("/control", sendDashboard); server.on("/control/", sendDashboard);
+  server.on("/controls", sendDashboard); server.on("/controls/", sendDashboard);
   server.onNotFound([](){
     if (server.uri().startsWith("/api/")) { server.send(404,"application/json","{\"error\":\"unknown API\"}"); return; }
     if (sendFile(server.uri())) return;
@@ -557,6 +630,7 @@ void setup() {
   server.begin(); Serial.print("Dashboard: http://"); Serial.println(WiFi.softAPIP());
 }
 void loop() {
+  if (!canReady && millis()-lastCanAttempt>=1000) { canBegin(); lastCanAttempt=millis(); }
   readCan(); serviceDrive(); serviceSteeringRelay(); server.handleClient(); readCan(); serviceDrive(); serviceSteeringRelay();
   if (millis()-lastBeat >= 1000) { lastBeat=millis(); canPrintStatus("Node 5 dashboard");
     Serial.printf("Dashboard: WiFi clients=%u LittleFS=%s buffered frames=%u total frames=%lu | Node 1=%s Node 3=%s | Node 2 status: inspect 0x201/0x600\n",

@@ -8,6 +8,6 @@ const goHome = () => window.location.assign('/')
 export default function App() {
   const path = window.location.pathname.replace(/\/+$/, '')
   if (path === '/status') return <StatusPage />
-  if (path === '/control') return <SteeringPanel onClose={goHome} />
+  if (path === '/control' || path === '/controls') return <SteeringPanel onClose={goHome} />
   return <HomePage />
 }

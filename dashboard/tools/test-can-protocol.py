@@ -92,7 +92,7 @@ void log(const char *label, const char *filter) { server.filter = filter; sendCa
 int main() {
   vehicle("empty"); sendDiagnostics(); record("diagnostics-empty");
   push(0x301, {0xD0,0x07}); // 2000, deliberately different from big-endian decoding
-  push(0x300, {0x25}); // cruise + reverse + headlight, autonomous OFF
+  push(0x300, {0x25}); // cruise + autonomous + reverse
   vehicle("live"); log("short-log", ""); log("filter", "0x301");
   clockMs = 1500; vehicle("at-500ms");
   clockMs = 1501; vehicle("stale-pedal");
@@ -105,7 +105,7 @@ int main() {
   push(0x301, {0,0}); vehicle("zero");
   push(0x301, {0x64,0x03}); vehicle("below-idle");
   push(0x301, {255,15}); vehicle("full");
-  for (int bit = 0; bit < 7; ++bit) {
+  for (int bit = 0; bit < 6; ++bit) {
     push(0x300, {uint8_t(1 << bit)});
     const std::string label = "bit-" + std::to_string(bit); vehicle(label.c_str());
   }
@@ -133,7 +133,10 @@ int main() {
   server.args["direction"]="left"; server.args["token"]=String(steeringRelay.token); server.args["seq"]="1";
   handleSteeringCommand(); assert(server.code==503 && outgoing.back().data[0]==0);
   push(0x111, {0,0,0,1,9,0,0,0}); readCan();
-  handleSteeringCommand(); assert(server.code==503); // Output status alone is insufficient.
+  server.args["token"]=String(steeringRelay.token);
+  handleSteeringCommand(); assert(server.code==200); // Output status permits speed control without angle.
+  assert(server.body.find("\"angleAvailable\":false")!=std::string::npos);
+  stopSteeringRelay();
   push(0x100, {0xFE,0x3B,10,1,100,0,0,0}); // -45.3 deg; IMU packet already 10 ms old.
   vehicle("steering-live"); sendSteeringState(); record("steering-state");
   push(0x100, {0x7F,0xFF,0,1,101,0,0,0}); vehicle("steering-invalid");
@@ -147,8 +150,9 @@ int main() {
   handleSteeringCommand(); assert(server.code==400 && outgoing.back().data[0]==0);
   server.args["seq"]="1"; server.args["token"]=String(steeringRelay.token);
   handleSteeringCommand(); assert(server.code==200);
-  clockMs+=240; sendSteeringState(); record("steering-expired"); assert(outgoing.back().data[0]==0);
-  assert(!steeringRelay.direction); // Source age + CAN age reaches 250 ms.
+  clockMs+=240; sendSteeringState(); record("steering-expired");
+  assert(steeringRelay.direction); // Source age only expires the angle display.
+  clockMs+=110; sendSteeringState(); assert(!steeringRelay.direction && outgoing.back().data[0]==0);
   push(0x100, {0,123,0,1,102,0,0,0}); readCan();
   server.args["seq"]="2"; handleSteeringCommand(); assert(server.code==409); // expired gesture
   server.args["token"]=String(steeringRelay.token); server.args["seq"]="1"; txWorks=false;
@@ -158,30 +162,54 @@ int main() {
   server.args["direction"]="stop"; handleSteeringCommand(); assert(server.code==200 && outgoing.back().data[0]==0);
 
   // Domain-invalid values must not refresh any live sensor/heartbeat.
-  push(0x300,{0x80}); push(0x201,{2,0,0,0,0,0,0,0});
+  push(0x300,{0x40}); push(0x300,{0x80}); push(0x201,{2,0,0,0,0,0,0,0});
   push(0x401,{2,0,0,0,0,0,0,0}); push(0x500,{0,90,0,2,0,0,0,0});
   push(0x400,{10,0,0,79,0,0,2,8}); push(0x600,{2,2,0,0,0,0,0,0});
   push(0x121,{4,0,0,0xD1,1,0,0,0});
   sendDiagnostics(); record("invalid-flags");
 
+  // The working sender reaches +/-270; Node 5 must retain the full range.
+  for(int tenths : {-2700,-1801,0,1801,2700}) {
+    const uint16_t encoded=(uint16_t)tenths;
+    push(0x100,{uint8_t(encoded>>8),uint8_t(encoded),0,1,103,0,0,0});
+    const std::string label="imu-range-"+std::to_string(tenths);
+    vehicle(label.c_str()); sendSteeringState(); record((label+"-control").c_str());
+  }
+  const auto angleInvalid=sampleFor(0x100)->invalid;
+  for(int tenths : {-2701,2701}) {
+    const uint16_t encoded=(uint16_t)tenths;
+    push(0x100,{uint8_t(encoded>>8),uint8_t(encoded),0,1,104,0,0,0}); readCan();
+  }
+  assert(sampleFor(0x100)->invalid==angleInvalid+2);
+  assert(steeringAngleTenths(sampleFor(0x100)->bytes)==2700);
+
   testDrive();
+  testJoystick();
   // Rewritten Node 2 supplies actual output commands and a heartbeat.
   clockMs=20000;
   push(0x201, {1,1,0,0,0,0,0,0}); vehicle("node2-small-duty");
   push(0x201, {1,1,1,40,0,1,0,0});
   push(0x600, {2,1,20,0,3,4,0,0});
   vehicle("node2-live");
+  for(uint8_t reason=0;reason<=9;++reason) {
+    push(0x201,{0,0,1,0,0,0,0,reason});
+    const std::string label="node2-reason-"+std::to_string(reason);
+    vehicle(label.c_str());
+  }
   clockMs+=250; vehicle("node2-output-stale");
   clockMs+=2750; vehicle("node2-offline");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory)
-    (path / 'check.cpp').write_text(shim + backend + (root / 'dashboard/tools/test-drive-api.h').read_text() + scenarios)
+    (path / 'check.cpp').write_text(shim + backend + (root / 'dashboard/tools/test-drive-api.h').read_text() + (root / 'dashboard/tools/test-joystick-api.h').read_text() + scenarios)
     subprocess.run(['g++', '-I', str(root / 'node5_dash'), '-std=c++17', '-Wall', '-Wextra', str(path / 'check.cpp'), '-o', str(path / 'check')], check=True)
     lines = subprocess.check_output([str(path / 'check')], text=True).splitlines()
 results = {}
 for line in lines:
+    if '\t' not in line:
+        print(line)
+        continue
     name, status, body = line.split('\t', 2)
     results[name] = (int(status), json.loads(body))
 def result(name):
@@ -190,13 +218,17 @@ def result(name):
     return body
 
 assert result('empty')['acceleratorAdc'] is None
+for tenths in [-2700,-1801,0,1801,2700]:
+    assert result(f'imu-range-{tenths}')['steeringDeg'] == tenths/10
+    control = result(f'imu-range-{tenths}-control')
+    assert control['angleAvailable'] is True and control['angleDeg'] == tenths/10
 assert result('empty')['nodes'][1]['alive'] is None
 live = result('live')
-assert live['acceleratorAdc'] == 2000 and live['acceleratorPct'] == 35
-assert live['acceleratorVoltageEstimate'] == 0.912
+assert live['acceleratorAdc'] == 2000 and live['acceleratorPct'] == 32
+assert live['acceleratorVoltageEstimate'] == 0.812
 assert live['acceleratorRawVoltageEstimate'] == 1.612
 assert live['throttleOut'] is None and live['reverseActive'] is None
-assert live['switches']['headlight'] is True and live['switches']['autonomous'] is False
+assert live['switches']['reverse'] is True and live['switches']['autonomous'] is True
 assert live['nodes'][0]['alive'] is True and live['nodes'][2]['alive'] is True
 assert live['nodes'][1]['alive'] is None and live['nodes'][1]['source'] == 'receive-only'
 frames = result('short-log')['frames']
@@ -206,13 +238,13 @@ assert len(result('filter')['frames']) == 1 and result('filter')['frames'][0]['i
 assert result('at-500ms')['acceleratorAdc'] == 2000
 for name in ['stale-pedal', 'malformed']:
     assert result(name)['acceleratorAdc'] is None
-    assert result(name)['switches']['headlight'] is True
+    assert result(name)['switches']['reverse'] is True
 assert result('malformed')['nodes'][0]['ageMs'] == 501
-assert result('at-3000ms')['switches']['headlight'] is True
-assert result('stale-switches')['switches']['headlight'] is None
+assert result('at-3000ms')['switches']['reverse'] is True
+assert result('stale-switches')['switches']['reverse'] is None
 assert result('zero')['acceleratorPct'] == 0
 assert result('full')['acceleratorAdc'] == 4095 and result('full')['acceleratorPct'] == 100
-names = ['cruise', 'eco', 'reverse', 'hill', 'horn', 'headlight', 'autonomous']
+names = ['cruise', 'hill', 'autonomous', 'remoteMode', 'horn', 'reverse']
 for bit, name in enumerate(names):
     assert result(f'bit-{bit}')['switches'] == {key: key == name for key in names}
 assert result('node4')['pitchDeg'] == -5 and result('node4')['ignitionUptime'] == 120
@@ -248,7 +280,7 @@ print('Invalid GPS and IMU payloads cannot replace valid samples')
 
 assert result("below-idle")["acceleratorVoltageEstimate"] == 0
 assert result("below-idle")["acceleratorPct"] == 0
-assert result("full")["acceleratorVoltageEstimate"] == 2.6
+assert result("full")["acceleratorVoltageEstimate"] == 2.5
 
 print("Steering HTTP tests passed: origin/header checks, node capability, PWM60, replay, invalid input, expiry and CAN failure")
 
@@ -260,21 +292,25 @@ assert result('steering-state')['angleDeg'] == -45.3
 assert result('steering-tx')['frames'][-1]['tx'] is True
 assert result('steering-tx')['frames'][-1]['data'][:2] == [1,60]
 assert result('steering-invalid')['steeringDeg'] == -45.3
-assert result('steering-expired')['ready'] is False and result('steering-expired')['angleDeg'] is None
+assert result('steering-expired')['ready'] is True and result('steering-expired')['angleDeg'] is None
 assert result('steering-expired')['angleAvailable'] is False
 assert result('steering-expired')['angleAgeMs'] == 250
 invalid = {s['id']: s['invalid'] for s in result('invalid-flags')['signals']}
-assert invalid[0x100] == 2 and invalid[0x300] == 3 and invalid[0x121] == 1
+assert invalid[0x100] == 2 and invalid[0x300] == 4 and invalid[0x121] == 1
 print('Steering feedback/API tests passed: signed angle, sequence, source age, missing/stale feedback, invalid flags and relay stop')
 
-print("Remote drive tests passed: CAN ownership, exact legacy frames, reversal, pedal override, expiry, stale ACK, CAN failure and recovery")
+print("Remote drive tests passed: CAN ownership, dedicated demand frames, reversal, physical-pedal blocking, expiry, stale ACK, CAN failure and recovery")
 
 n2 = result('node2-live')
 assert result('node2-small-duty')['motor1'] is True and result('node2-small-duty')['throttleOut'] == 0
 assert n2['throttleOut'] == 40 and n2['reverseActive'] is True
+assert n2['powertrainReason'] == 0
+for reason in range(10):
+    assert result(f'node2-reason-{reason}')['powertrainReason'] == reason
 assert n2['nodes'][1]['alive'] is True and n2['nodes'][1]['source'] == 'heartbeat'
 assert n2['nodes'][1]['tx'] == 3 and n2['nodes'][1]['rx'] == 4
 assert result('node2-output-stale')['throttleOut'] is None
+assert result('node2-output-stale')['powertrainReason'] is None
 assert result('node2-output-stale')['nodes'][1]['alive'] is True
 assert result('node2-offline')['nodes'][1]['alive'] is False
 print('Node 2 telemetry tests passed: output commands, heartbeat, independent expiry, receive-only compatibility')

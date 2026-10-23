@@ -5,6 +5,8 @@
 
 constexpr uint32_t STEERING_ANGLE_ID = 0x100;
 constexpr uint32_t STEERING_FEEDBACK_TIMEOUT_MS = 250;
+// Match the supplied IMU sender's constrained angle range.
+constexpr int16_t STEERING_MAX_ANGLE_DEG = 270;
 
 // Exact wire format sent by the steering-wheel ESP32 (ESP-NOW, little-endian).
 struct __attribute__((packed)) IMUData {
@@ -12,6 +14,14 @@ struct __attribute__((packed)) IMUData {
   uint32_t sequence;
 };
 static_assert(sizeof(float) == 4 && sizeof(IMUData) == 8, "Steering IMU packet must be 8 bytes");
+// New sender appends one packed bool. Read it as a byte to validate its wire
+// representation before converting to bool; keep the old 8-byte sender working.
+struct __attribute__((packed)) IMUDataWithHorn {
+  float steeringAngle;
+  uint32_t sequence;
+  uint8_t hornPressed;
+};
+static_assert(sizeof(IMUDataWithHorn) == 9, "Steering IMU + horn packet must be 9 bytes");
 
 inline int16_t steeringAngleTenths(const uint8_t *d) {
   return (int16_t)(((uint16_t)d[0] << 8) | d[1]);
@@ -21,7 +31,7 @@ inline uint32_t steeringAngleSequence(const uint8_t *d) {
 }
 inline bool steeringAngleFrameValid(const uint8_t *d) {
   const int16_t angle = steeringAngleTenths(d);
-  return angle >= -1800 && angle <= 1800 && d[3] <= 1 &&
+  return angle >= -STEERING_MAX_ANGLE_DEG * 10 && angle <= STEERING_MAX_ANGLE_DEG * 10 && d[3] <= 1 &&
     (!d[3] || d[2] < STEERING_FEEDBACK_TIMEOUT_MS);
 }
 inline bool steeringAngleFrameFresh(const uint8_t *d, uint32_t canAgeMs) {
@@ -34,14 +44,17 @@ struct SteeringFeedback {
   uint32_t sequence = 0, receivedAt = 0, accepted = 0, invalid = 0, replayed = 0;
   uint32_t outages = 0;
   bool seen = false;
+  bool hornAvailable = false, hornPressed = false;
 
   bool fresh(uint32_t now) const { return seen && now - receivedAt < STEERING_FEEDBACK_TIMEOUT_MS; }
 
   bool accept(const uint8_t *bytes, int len, uint32_t now) {
-    if (!bytes || len != (int)sizeof(IMUData)) { ++invalid; return false; }
+    if (!bytes || (len != (int)sizeof(IMUData) && len != (int)sizeof(IMUDataWithHorn))) { ++invalid; return false; }
+    const bool hasHorn = len == (int)sizeof(IMUDataWithHorn);
+    if (hasHorn && bytes[8] > 1) { ++invalid; return false; }
     IMUData packet;
     memcpy(&packet, bytes, sizeof(packet));
-    if (!isfinite(packet.steeringAngle) || packet.steeringAngle < -180 || packet.steeringAngle > 180) {
+    if (!isfinite(packet.steeringAngle) || packet.steeringAngle < -STEERING_MAX_ANGLE_DEG || packet.steeringAngle > STEERING_MAX_ANGLE_DEG) {
       ++invalid; return false;
     }
     const uint32_t advance = packet.sequence - sequence;
@@ -52,6 +65,7 @@ struct SteeringFeedback {
     }
     if (seen && !fresh(now)) ++outages;
     angle = packet.steeringAngle; sequence = packet.sequence; receivedAt = now;
+    hornAvailable = hasHorn; hornPressed = hasHorn && bytes[8] == 1;
     seen = true; ++accepted; return true;
   }
 

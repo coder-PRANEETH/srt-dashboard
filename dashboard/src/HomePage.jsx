@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import MapView from './MapView'
 import { advanceTrack, useNow, useTelemetry, validFix } from './useTelemetry'
-import { display, freshFeed, number } from './diagnostics'
+import { display, freshFeed, number, STEERING_MAX_ANGLE_DEG } from './diagnostics'
 
 function introNeeded() {
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return false
@@ -27,7 +27,7 @@ export default function HomePage() {
   const [memory, setMemory] = useState({ gps: null, vehicle: null, angle: 0, track: { points: [], trip: 0, heading: null, at: 0 } })
   if (memory.gps !== feeds.gps || memory.vehicle !== feeds.vehicle) {
     const v = feeds.vehicle?.data
-    setMemory({ gps: feeds.gps, vehicle: feeds.vehicle, angle: v?.steeringLink && number(v.steeringDeg) && Math.abs(v.steeringDeg) <= 180 ? v.steeringDeg : memory.angle,
+    setMemory({ gps: feeds.gps, vehicle: feeds.vehicle, angle: v?.steeringLink && number(v.steeringDeg) && Math.abs(v.steeringDeg) <= STEERING_MAX_ANGLE_DEG ? v.steeringDeg : memory.angle,
       track: memory.gps !== feeds.gps ? advanceTrack(memory.track, feeds.gps?.data, feeds.gps?.at) : memory.track })
   }
   useEffect(() => {
@@ -37,7 +37,7 @@ export default function HomePage() {
   }, [])
   const vehicle = freshFeed(feeds.vehicle, now), gps = freshFeed(feeds.gps, now)
   const fix = validFix(gps) && (gps.ageMs || 0) + now - feeds.gps.at < 3000
-  const steeringAvailable = !!vehicle?.steeringLink && number(vehicle.steeringDeg) && Math.abs(vehicle.steeringDeg) <= 180 && now - feeds.vehicle.at < 1000
+  const steeringAvailable = !!vehicle?.steeringLink && number(vehicle.steeringDeg) && Math.abs(vehicle.steeringDeg) <= STEERING_MAX_ANGLE_DEG && now - feeds.vehicle.at < 1000
   const accelerator = now - (feeds.vehicle?.at || 0) < 750 ? vehicle?.acceleratorPct : null
   const speed = fix && number(gps.speed) ? Math.max(0, Math.min(160, gps.speed)) : null
   const digits = number(speed) ? String(Math.round(speed)).padStart(3, '0') : '—'

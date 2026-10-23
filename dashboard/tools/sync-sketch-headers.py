@@ -6,11 +6,11 @@ import shutil
 
 ROOT = Path(__file__).resolve().parents[2]
 HEADERS = {
-    'node1_bcm': ['ThrottleCalibration.h', 'SteeringControl.h', 'SteeringFeedback.h', 'RemoteDrive.h'],
-    'node2_pcm': ['CanCommon.h', 'ThrottleCalibration.h'],
-    'node3_ccm': ['RemoteDrive.h'],
-    'node4_tcu': ['CanCommon.h'],
-    'node5_dash': ['CanCommon.h', 'ThrottleCalibration.h', 'SteeringControl.h', 'SteeringFeedback.h', 'RemoteDrive.h'],
+    'node1_bcm': ['ThrottleCalibration.h', 'SteeringControl.h', 'SteeringFeedback.h', 'RemoteDrive.h', 'SwitchSignals.h'],
+    'node2_pcm': ['CanCommon.h', 'ThrottleCalibration.h', 'RemoteDrive.h', 'SwitchSignals.h'],
+    'node3_ccm': ['RemoteDrive.h', 'SwitchSignals.h'],
+    'node4_tcu': ['CanCommon.h', 'SwitchSignals.h'],
+    'node5_dash': ['CanCommon.h', 'ThrottleCalibration.h', 'SteeringControl.h', 'SteeringFeedback.h', 'RemoteDrive.h', 'SwitchSignals.h'],
 }
 
 

@@ -1,11 +1,12 @@
 // One physical hold owns one token. Errors and late responses cannot resume it.
 export function createDriveClient(onState, fetcher = fetch) {
-  let disposed=false, held=null, changing=false, generation=0, pollTimer, moveTimer, limitTimer, motionRequest
+  let disposed=false, held=null, changing=false, generation=0, pollTimer, moveTimer, limitTimer, motionRequest, pollRequest
   let state={ready:false,held:false,active:false,adc:0,reverse:false,canShift:false,message:'CONNECTING'}
   const publish=patch=>{state={...state,...patch};if(!disposed)onState(state)}
-  const apply=data=>({...data,active:data.held,held:!!held})
+  const apply=data=>({...data,active:data.held,held:held?.action==='throttle',shifting:held?.action==='reverse'||!!data.shifting})
   async function request(method,params,signal,keepalive=false) {
-    const controller=new AbortController(),abort=()=>controller.abort(),timeout=setTimeout(abort,250)
+    // Motion stays below the 350 ms firmware lease; status/STOP can wait longer.
+    const controller=new AbortController(),abort=()=>controller.abort(),timeout=setTimeout(abort,method==='GET'||params?.action==='stop'?1000:300)
     signal?.addEventListener('abort',abort,{once:true})
     try {
       const response=await fetcher('/api/drive',{method,cache:'no-store',signal:controller.signal,keepalive,
@@ -17,7 +18,7 @@ export function createDriveClient(onState, fetcher = fetch) {
     } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort)}
   }
   async function stop(message='') {
-    const stopped=++generation;held=null;changing=false;clearTimeout(moveTimer);clearTimeout(limitTimer);motionRequest?.abort()
+    const stopped=++generation;pollRequest?.abort();held=null;changing=false;clearTimeout(moveTimer);clearTimeout(limitTimer);motionRequest?.abort();pollRequest?.abort()
     publish({ready:false,held:false,active:false,canShift:false,shifting:false,message})
     try {const data=await request('POST',{action:'stop'},null,true);if(generation===stopped)publish({...apply(data),message:message||data.message})}
     catch {if(generation===stopped)publish({ready:false,adc:null,message:'CONNECTION LOST'})}
@@ -26,38 +27,39 @@ export function createDriveClient(onState, fetcher = fetch) {
     if(disposed)return
     const before=generation
     if(!held&&!changing) {
-      try {const data=await request('GET');if(before===generation&&!held&&!changing)publish(apply(data))}
+      try {pollRequest=new AbortController();const data=await request('GET',null,pollRequest.signal);if(before===generation&&!held&&!changing)publish(apply(data))}
       catch {if(before===generation)publish({ready:false,canShift:false,adc:null,message:'CONNECTION LOST'})}
     }
     if(!disposed)pollTimer=setTimeout(poll,250)
   }
   async function move(gesture) {
     if(disposed||held!==gesture)return
-    motionRequest=new AbortController()
+    const started=Date.now();motionRequest=new AbortController()
     try {
-      const data=await request('POST',{action:'throttle',token:gesture.token,seq:++gesture.seq,percent:gesture.percent},motionRequest.signal)
+      const data=await request('POST',{action:gesture.action,token:gesture.token,seq:++gesture.seq,...(gesture.action==='reverse'?{reverse:gesture.reverse?1:0}:{percent:gesture.percent})},motionRequest.signal)
       if(disposed||held!==gesture)return
+      if(gesture.action==='reverse' && !data.held && data.appliedReverse===gesture.reverse && !data.shifting) {
+        held=null;changing=false;clearTimeout(limitTimer);publish(apply(data));return
+      }
       if(!data.ready||!data.held||data.token!==gesture.token){stop('RELEASE & RETRY');return}
-      publish(apply(data));moveTimer=setTimeout(()=>move(gesture),80)
-    } catch(error) {if(!disposed&&held===gesture)stop(error.name==='AbortError'?'CONNECTION LOST':error.message)}
+      publish(apply(data));moveTimer=setTimeout(()=>move(gesture),Math.max(0,80-(Date.now()-started)))
+    } catch(error) {if(!disposed&&held===gesture)stop(error.name==='AbortError'?'COMMAND TIMED OUT — RELEASE & RETRY':error.message)}
   }
   poll()
   return {
     start(percent) {
       if(held){stop();return false}
       if(disposed||changing||!state.ready||state.active||!Number.isInteger(percent)||percent<1||percent>100)return false
-      ++generation;held={token:state.token,percent,seq:0}
+      ++generation;pollRequest?.abort();held={action:'throttle',token:state.token,percent,seq:0}
       publish({held:true,active:true,canShift:false,message:'ARMING'})
       limitTimer=setTimeout(()=>stop('RELEASE & RETRY'),4900);move(held);return true
     },
     async reverse() {
       if(disposed||changing||held||state.active||!state.ready||!state.canShift)return false
-      const before=++generation,token=state.token,reverse=!state.reverse;changing=true
-      publish({shifting:true,canShift:false})
-      try {
-        const data=await request('POST',{action:'reverse',token,reverse:reverse?1:0})
-        if(before===generation){changing=false;publish({...apply(data),shifting:false})}
-      } catch(error) {if(before===generation)stop(error.message)}
+      ++generation;pollRequest?.abort();changing=true
+      held={action:'reverse',token:state.token,reverse:!state.reverse,seq:0}
+      publish({shifting:true,active:true,held:false,canShift:false,message:'WAITING FOR DIRECTION ACK'})
+      limitTimer=setTimeout(()=>stop('RELEASE & RETRY'),4900);move(held)
       return true
     },
     stop,

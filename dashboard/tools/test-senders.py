@@ -8,6 +8,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 common = r'''
 #include <algorithm>
+#include "SwitchSignals.h"
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -31,6 +32,9 @@ void pinMode(int pin,int mode){pinModes[pin]=mode;}
 int digitalRead(int pin){return pins[pin];}
 template<class T> T constrain(T value,T low,T high){return std::max(low,std::min(high,value));}
 struct SerialMock {
+  std::deque<char> input;
+  int available(){return input.size();}
+  int read(){const auto c=input.front();input.pop_front();return c;}
   void begin(int){}
   template<class... T> void printf(const char*,T...){}
   template<class T> void print(T){}
@@ -79,9 +83,9 @@ constexpr int WIFI_STA=1,WIFI_SECOND_CHAN_NONE=0,ESP_OK=0;
 struct esp_now_recv_info_t {};
 struct WifiMock {
   bool mode(int){return true;}void setSleep(bool){}void setAutoReconnect(bool){}
-  const char *macAddress(){return "00:4B:12:34:C8:74";}
+  const char *macAddress(){return "68:09:47:DF:8E:E8";}
 } WiFi;
-int esp_wifi_set_channel(uint8_t,int){return ESP_OK;}
+int esp_wifi_set_channel(uint8_t channel,int){assert(channel==1);return ESP_OK;}
 int esp_now_init(){return ESP_OK;}int esp_now_deinit(){return ESP_OK;}
 int esp_now_register_recv_cb(void (*)(const esp_now_recv_info_t*,const uint8_t*,int)){return ESP_OK;}
 uint32_t esp_random(){return 9;}
@@ -89,13 +93,48 @@ int inputAdc=0;
 void analogReadResolution(int bits){assert(bits==12);}
 int analogRead(int pin){assert(pin==34);return inputAdc;}
 void analogWrite(int pin,int value){
-  assert((pin==32 || pin==33) && (value==0 || value==60));
+  assert((pin==32 || pin==33) && value>=0 && value<=255);
   pins[pin]=value;assert(!(pins[32] && pins[33]));
 }
 '''
 node1 = r'''
 int main(){
   setup();assert(canReady && steeringRadioReady);
+  IMUData packet={0,0};
+  for(float angle : {-270.0f,-180.1f,180.1f,270.0f}) {
+    packet.steeringAngle=angle; ++packet.sequence; clockMs+=50;
+    onSteeringAngle(nullptr,(const uint8_t*)&packet,sizeof(packet)); loop();
+    assert(steeringFeedback.angle==angle && steering.feedbackAvailable);
+    const auto status=last(0x100);
+    assert(status.len==8 && steeringAngleFrameValid(status.data) && status.data[3]==1);
+    assert(steeringAngleTenths(status.data)==lroundf(angle*10));
+  }
+  // Exact new user sender ABI, including its packed bool hornPressed.
+  struct __attribute__((packed)) SenderPacket { float steeringAngle; uint32_t sequence; bool hornPressed; };
+  static_assert(sizeof(SenderPacket)==9);
+  for(bool pressed : {false,true,false}) {
+    SenderPacket sent={-269.5f,++packet.sequence,pressed}; clockMs+=50;
+    onSteeringAngle(nullptr,(const uint8_t*)&sent,sizeof(sent)); loop();
+    assert(steeringFeedback.angle==sent.steeringAngle && steeringFeedback.hornAvailable && steeringFeedback.hornPressed==pressed);
+    assert(last(0x100).data[3]==1 && steeringAngleTenths(last(0x100).data)==-2695);
+  }
+  assert(steeringFeedback.invalid==0);
+  puts("IMU sender compatibility passed: old 8-byte and new 9-byte packed horn callback, channel 1, signed +/-270 degree CAN telemetry");
+  // Exercise serial controls through the actual live loop and CAN handlers.
+  inputAdc=795;Serial.input.push_back('a');clockMs+=50;loop();
+  assert(serialSteeringActive && pins[32]==60 && pins[33]==0);
+  assert(last(0x301).data[0]==uint8_t(795) && last(0x301).data[1]==uint8_t(795>>8));
+  assert(last(0x111).data[0]==1 && last(0x111).data[1]==60);
+  Frame motion{};motion.id=0x110;motion.len=8;motion.data[0]=2;motion.data[1]=100;motion.data[2]=1;
+  steeringWrite32(motion.data+4,steering.token);incoming.push_back(motion);loop();
+  assert(serialSteeringActive && pins[32]==60 && pins[33]==0); // Serial owns the motor.
+  push(0x110,{0,0,0,0,0,0,0,0});loop();
+  assert(!serialSteeringActive && !pins[32] && !pins[33]); // CAN STOP remains effective.
+  incoming.push_back(motion);loop();assert(!pins[32] && !pins[33]); // Old CAN token cannot resume.
+  Serial.input.push_back('d');loop();assert(serialSteeringActive && pins[33]==60);
+  canTxWorks=false;clockMs+=50;loop();assert(!serialSteeringActive && !pins[32] && !pins[33]);
+  canTxWorks=true;clockMs+=50;loop();assert(!pins[32] && !pins[33]);
+  puts("Live serial/CAN integration passed: pedal frames and output telemetry continue, serial ownership, CAN STOP, stale-token rejection and TX-fault stop");
   for(inputAdc=0;inputAdc<=4095;++inputAdc){
     clockMs+=50;loop();const auto frame=last(0x301);
     assert(frame.len==2 && frame.data[0]==uint8_t(inputAdc) && frame.data[1]==uint8_t(inputAdc>>8));
@@ -105,7 +144,25 @@ int main(){
   const auto successful=txOK,failed=txFailed;
   canTxWorks=false;clockMs+=50;loop();assert(txFailed>failed && txOK==successful);
   canTxWorks=true;clockMs+=50;loop();assert(lastSendOK && txOK>successful);
-  puts("Node 1 raw CAN tests passed: all 4096 ADC values unchanged, little-endian, 0.7 V baseline retained");
+  // Boundary at 0.8 V: ADC 992 may claim, 993 must be rejected.
+  for(int raw : {930,992,993}) {
+    driveGate=RemoteDriveGate{};inputAdc=raw;
+    Frame probe{};probe.id=0x120;probe.len=8;probe.data[0]=1;probe.data[1]=2;
+    probe.data[2]=98;probe.data[6]=1;incoming.push_back(probe);clockMs+=50;loop();
+    assert((driveGate.phase==1)==(raw<=992));
+  }
+  driveGate=RemoteDriveGate{};inputAdc=0;clockMs+=50;loop();
+  uint8_t claim[8]={1,2,99,0,0,0,1,0};
+  Frame f{};f.id=0x120;f.len=8;memcpy(f.data,claim,8);incoming.push_back(f);loop();assert(driveGate.phase==1);
+  const auto sent=count(0x301);inputAdc=4095;
+  for(int n=2;n<=5;++n){clockMs+=50;f.data[6]=n;incoming.push_back(f);loop();assert(driveGate.phase==1 && count(0x301)==sent);}
+  clockMs+=350;loop();assert(driveGate.phase==2 && last(0x301).data[0]==0xE0 && last(0x301).data[1]==3);
+  puts("Node 1 raw CAN tests passed: all 4096 ADC values unchanged, little-endian, physical raw baseline retained; locked sender emits 0.8 V idle");
+  canInitWorks=false;initializeCAN();const auto attempts=canInitCalls;
+  assert(!canReady);clockMs=lastCanAttempt+999;loop();assert(canInitCalls==attempts);
+  canInitWorks=true;clockMs=lastCanAttempt+1000;loop();
+  assert(canReady && canInitCalls==attempts+1 && last(0x111).len==8);
+  puts("Node 1 recovers a failed CAN startup and publishes steering status without rebooting");
 }
 '''
 node3 = r'''
@@ -115,38 +172,40 @@ int main(){
   clockMs=10;pins[4]=LOW;loop();clockMs=34;loop();assert(last(0x300).data[0]==0);
   clockMs=35;loop();assert(last(0x300).data[0]==1);
   clockMs=40;for(auto pin:switchPins)pins[pin]=LOW;loop();clockMs=65;loop();
-  assert(last(0x300).data[0]==127);
+  assert(last(0x300).data[0]==63);
   auto sent=count(0x300);clockMs=1064;loop();assert(count(0x300)==sent);
   clockMs=1065;loop();assert(count(0x300)==sent+1);
-  const auto status=last(0x122);assert(status.len==8 && driveStatusValid(status.data,127));
-  assert(status.data[1]==127 && status.data[2]==0);
+  const auto status=last(0x122);assert(status.len==8 && driveStatusValid(status.data,63));
+  assert(status.data[1]==63 && status.data[2]==0);
   uint8_t claim[8]={1,0,0,0,0,0,1,0};driveWrite32(claim+2,111);
   Frame f{};f.id=0x120;f.len=8;memcpy(f.data,claim,8);incoming.push_back(f);
   clockMs=1070;sent=count(0x300);loop();assert(driveGate.phase==1 && count(0x300)==sent);
   clockMs=1420;loop();assert(driveGate.phase==2);
-  assert(last(0x300).data[0]==(2|8|16|32)); // Expired remote ownership holds direction.
+  assert(last(0x300).data[0]==(2|8|16)); // Expired remote ownership holds direction.
   incoming.push_back(f);loop();assert(driveGate.phase==2); // Expired session cannot resume.
   f.data[0]=2;incoming.push_back(f);loop();assert(driveGate.phase==2); // Physical reverse mismatch.
-  clockMs=1430;pins[13]=HIGH;loop();clockMs=1455;incoming.push_back(f);loop();
-  assert(driveGate.phase==0 && last(0x300).data[0]==123);
+  clockMs=1430;pins[33]=HIGH;loop();clockMs=1455;incoming.push_back(f);loop();
+  assert(driveGate.phase==0 && last(0x300).data[0]==31);
   // Literal wiring from the supplied working sketch; test every combination.
-  const int expectedPins[]={4,5,13,14,26,33,32};
-  for(int bit=0;bit<7;++bit)assert(switchPins[bit]==expectedPins[bit] && pinModes[expectedPins[bit]]==INPUT_PULLUP);
-  for(unsigned mask=0;mask<128;++mask) {
+  const int expectedPins[]={4,5,13,14,26,33};
+  assert(SWITCH_COUNT==6 && SWITCH_VALID_MASK==0x3f && SWITCH_REVERSE==0x20);
+  assert(pinModes[32]==0); // Removed SPST2 must never be configured as an input.
+  for(int bit=0;bit<6;++bit)assert(switchPins[bit]==expectedPins[bit] && pinModes[expectedPins[bit]]==INPUT_PULLUP);
+  for(unsigned mask=0;mask<64;++mask) {
     clockMs+=30;
-    for(int bit=0;bit<7;++bit)pins[expectedPins[bit]]=(mask&(1U<<bit))?LOW:HIGH;
+    for(int bit=0;bit<6;++bit)pins[expectedPins[bit]]=(mask&(1U<<bit))?LOW:HIGH;
     loop();clockMs+=25;loop();
     const auto actual=last(0x300);assert(actual.len==1 && actual.data[0]==mask);
     assert(buildPayload()==mask);
   }
   // Chattering contacts must not publish a transient reverse or switch state.
-  for(int bit=0;bit<7;++bit) {
+  for(int bit=0;bit<6;++bit) {
     clockMs+=10;pins[expectedPins[bit]]=HIGH;loop();
     clockMs+=10;pins[expectedPins[bit]]=LOW;loop();
-    clockMs+=25;loop();assert(buildPayload()==127);
+    clockMs+=25;loop();assert(buildPayload()==63);
   }
   // A failed TX remains pending; it must not reset the CAN controller.
-  const auto calls=canInitCalls,failed=txFailed;sent=count(0x300);
+  const auto calls=canInitCalls;const auto failed=txFailed;sent=count(0x300);
   canTxWorks=false;sendPending=true;++clockMs;loop();
   assert(sendPending && txFailed>failed && count(0x300)==sent && canInitCalls==calls);
   canTxWorks=true;++clockMs;loop();assert(!sendPending && count(0x300)==sent+1);
@@ -155,7 +214,7 @@ int main(){
   canInitWorks=true;++clockMs;loop();assert(canReady && canInitCalls==attempts+1);
   canModeWorks=false;initializeCAN();assert(!canReady);
   canModeWorks=true;clockMs+=1000;loop();assert(canReady);
-  puts("Node 3 sender tests passed: exact GPIOs, all 128 switch masks, bounce, DLC1, 1 s refresh, TX retry, init/mode recovery, gate telemetry, ownership expiry and reverse handoff");
+  puts("Node 3 sender tests passed: exact GPIOs, all 64 switch masks, bounce, DLC1, 1 s refresh, TX retry, init/mode recovery, gate telemetry, ownership expiry and reverse handoff");
 }
 '''
 node4_io = r'''
@@ -208,11 +267,13 @@ int main(){
   assert(p.data[3]==80 && p.data[4]==0 && p.data[5]==0); // Degree-boundary carry.
   assert(last(0x401).data[0]==1 && last(0x401).data[2]==0);
   clockMs=2000;loop();assert(last(0x401).data[1]==0 && last(0x401).data[2]==1);
-  push(0x300,{8});clockMs=2001;loop();clockMs=2050;loop();
+  push(0x300,{2});clockMs=2001;loop();clockMs=2050;loop();
   auto h=last(0x500);assert(h.data[0]==1 && h.data[1]==135 && h.data[2]==0 && h.data[3]==1);
   clockMs=5001;loop();assert(last(0x500).data[0]==1); // One-second switch refresh is allowed.
   clockMs=5501;loop();assert(last(0x500).data[0]==0);
-  push(0x300,{0x88});clockMs=5502;loop();assert(!switchSeen);
+  push(0x300,{0x42});clockMs=5502;loop();assert(!switchSeen);
+  push(0x300,{8});++clockMs;loop();assert(switchSeen && !hillRequest); // Remote mode is not HillHold.
+  push(0x300,{0x82});++clockMs;loop();assert(!switchSeen);
   gps.location.latitude=-10;clockMs=6501;loop();assert(!last(0x400).data[6]);
   gps.location.latitude=90;gps.location.longitude=180;clockMs=7501;loop();
   p=last(0x400);assert(p.data[0]==90 && p.data[3]==180 && p.data[6]==1);

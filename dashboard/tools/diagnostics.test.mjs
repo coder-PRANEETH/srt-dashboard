@@ -3,10 +3,33 @@ import assert from 'node:assert/strict'
 import { decodeFrame, diagnosticsModel, display, filterFrames, parseId, throttleVoltage, throttlePercent } from '../src/diagnostics.js'
 import { advanceTrack } from '../src/useTelemetry.js'
 const frame = (id, data) => decodeFrame({ seq: 1, ms: 1000, id, data, dlc: data.length })
+test('Node 3 exposes exactly six signals in wire order, including remote physical status', () => {
+  const keys=['cruise','hill','autonomous','remoteMode','horn','reverse']
+  const labels=['Cruise','HillHold','Autonomous','Remote mode','Horn','Reverse']
+  const pins=[4,5,13,14,26,33]
+  for(let mask=0;mask<64;mask++) {
+    const decoded=frame(0x300,[mask])
+    assert.equal(decoded.issue,false)
+    assert.equal(decoded.text,labels.map((label,bit)=>`${label} ${mask&(1<<bit)?'ON':'OFF'}`).join(' · '))
+    for(const remote of [false,true]) {
+      const data=remote?{remoteDrive:{switchMask:mask}}:{switches:Object.fromEntries(keys.map((key,bit)=>[key,!!(mask&(1<<bit))]))}
+      const sensors=diagnosticsModel({vehicle:{at:1000,data}},1000).nodes[2].sensors.slice(0,6)
+      assert.deepEqual(sensors.map(s=>s.name),labels)
+      sensors.forEach((s,bit)=>{
+        assert.equal(s.value,mask&(1<<bit)?'ON':'OFF')
+        assert.match(s.detail,new RegExp(`^GPIO${pins[bit]} ·`))
+      })
+    }
+  }
+  for(const mask of [0x40,0x80,0xff]) {
+    assert.equal(frame(0x300,[mask]).issue,true)
+    assert.equal(frame(0x122,[0,mask,0,0xD1,1,0,0,0]).issue,true)
+  }
+})
 test('decode actual short payloads, zero and malformed frames', () => {
-  assert.match(frame(0x301,[0xd0,7]).text,/2000\/4095 · 35%/)
+  assert.match(frame(0x301,[0xd0,7]).text,/2000\/4095 · 32%/)
   assert.match(frame(0x301,[0,0]).text,/0\/4095 · 0%/)
-  assert.match(frame(0x300,[0x25]).text,/cruise ON · eco OFF · reverse ON/)
+  assert.match(frame(0x300,[0x25]).text,/Cruise ON · HillHold OFF · Autonomous ON · Remote mode OFF · Horn OFF · Reverse ON/)
   assert.equal(frame(0x301,[0,16]).issue,true)
   assert.equal(frame(0x301,[0,0,0,0,0,0,0,0]).issue,true)
   assert.equal(frame(0x500,[1,90,0,0,0,0,0,0]).issue,true)
@@ -34,6 +57,14 @@ test('wireless steering frame and diagnostics preserve signed angle and reject i
   let model=diagnosticsModel(feeds,1000)
   assert.equal(model.nodes[0].sensors.find(s=>s.name==='Steering angle').value,'-45.3°')
   assert.ok(!model.faults.some(f=>f.key==='steering-angle'))
+  for(const degrees of [-270,-180.1,0,180.1,270,-270.1,270.1]) {
+    const raw=Math.round(degrees*10)&0xffff, valid=Math.abs(degrees)<=270
+    assert.equal(frame(0x100,[raw>>8,raw&255,0,1,101,0,0,0]).issue,!valid)
+    feeds.vehicle.data.steeringDeg=degrees
+    const sensor=diagnosticsModel(feeds,1000).nodes[0].sensors.find(s=>s.name==='Steering angle')
+    assert.equal(sensor.state,valid?'LIVE':'UNAVAILABLE')
+    assert.equal(sensor.value,valid?`${degrees.toFixed(1)}°`:'—')
+  }
   feeds.vehicle.data.steeringLink=false
   model=diagnosticsModel(feeds,1000)
   assert.equal(model.nodes[0].sensors.find(s=>s.name==='Steering angle').state,'UNAVAILABLE')
@@ -66,7 +97,7 @@ test('Node 2 output commands and heartbeat are observable when supplied', () => 
   model=diagnosticsModel(feeds,1000);assert.equal(model.nodes[1].state,'OFFLINE')
 })
 test('Node 2 names every stop reason, including disabled outputs and idle interlocks', () => {
-  const names=['ready','CAN unavailable / TX failure','PWM setup / write failure','pedal missing / stale / invalid','switches missing / stale / invalid','release pedal to resume','direction change / settling','traction outputs disabled','reverse relays disabled']
+  const names=['ready','CAN unavailable / TX failure','PWM setup / write failure','pedal missing / stale / invalid','switches missing / stale / invalid','release pedal to resume','direction change / settling','traction outputs disabled','reverse relays disabled','remote command missing / expired']
   for(const [reason,name] of names.entries()) {
     assert.ok(frame(0x201,[0,0,0,0,0,0,0,reason]).text.includes(name))
     assert.ok(frame(0x600,[2,reason?0:1,0,reason,0,0,0,0]).text.includes(name))
@@ -79,6 +110,14 @@ test('Node 2 names every stop reason, including disabled outputs and idle interl
     assert.equal(model.nodes[1].sensors.find(s=>s.name==='Motor stop reason').state,'UNAVAILABLE')
     assert.equal(model.faults.some(f=>f.key==='powertrain'),false)
   }
+})
+test('variable steering and direct joystick CAN frames decode consistently',()=>{
+  for(let pwm=1;pwm<=255;pwm++)assert.equal(frame(0x111,[2,pwm,0,2,1,0,0,0]).issue,false)
+  assert.equal(frame(0x111,[1,0,0,2,1,0,0,0]).issue,true)
+  assert.equal(frame(0x111,[1,255,0,1,1,0,0,0]).issue,true)
+  assert.match(frame(0x123,[180,1,1,0,99,0,0,0]).text,/Demand 180\/255 · REVERSE/)
+  assert.equal(frame(0x124,[1,180,0,0xD1,99,0,0,0]).issue,false)
+  assert.equal(frame(0x124,[2,0,0,0xD1,99,0,0,0]).issue,true)
 })
 test('trip rejects jitter/jumps, avoids outage distance, bounds route history', () => {
   let route={points:[],trip:0,heading:null,at:0}
@@ -98,18 +137,21 @@ test('idle voltage is subtracted once and clamps to zero', () => {
   assert.equal(throttleVoltage(0),0)
   assert.equal(throttleVoltage(868),0)
   assert.equal(throttlePercent(868),0)
+  assert.equal(throttleVoltage(992),0)
+  assert.equal(throttlePercent(992),0)
+  assert.ok(throttleVoltage(993)>0)
   assert.equal(throttlePercent(4095),100)
-  assert.ok(Math.abs(throttleVoltage(2000)-0.9117216)<0.000001)
+  assert.ok(Math.abs(throttleVoltage(2000)-0.8117216)<0.000001)
 })
 
 test('remote frames are tagged as host commands; handoff failures and physical sensors remain distinct',()=>{
   const tx=decodeFrame({id:0x301,dlc:2,data:[255,3],tx:true})
   assert.equal(tx.node,5);assert.equal(tx.kind,'Remote throttle command')
-  assert.match(frame(0x121,[2,100,0,0xD1,1,0,0,0]).text,/ZERO LOCK/)
+  assert.match(frame(0x121,[2,100,0,0xD1,1,0,0,0]).text,/IDLE LOCK/)
   assert.equal(frame(0x122,[2,4,0,0xD1,1,0,0,0]).issue,true)
-  const model=diagnosticsModel({vehicle:{at:1000,data:{canReady:true,acceleratorAdc:3000,remoteDrive:{active:true,adc:3000,pedalAdc:0,switchMask:4,pedalGate:1,switchGate:2,reason:'HANDOFF LOST'}}}},1000)
+  const model=diagnosticsModel({vehicle:{at:1000,data:{canReady:true,acceleratorAdc:3000,remoteDrive:{active:true,adc:3000,pedalAdc:0,switchMask:32,pedalGate:1,switchGate:2,reason:'HANDOFF LOST'}}}},1000)
   assert.equal(model.nodes[0].sensors[0].value,'0 / 4095')
-  assert.equal(model.nodes[2].sensors[2].value,'ON')
+  assert.equal(model.nodes[2].sensors[5].value,'ON')
   assert.ok(model.faults.some(f=>f.key==='drive-gate-3'))
   assert.ok(model.faults.some(f=>f.key==='remote-drive'))
 })

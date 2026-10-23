@@ -4,6 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "test": "node --test tools/*.test.mjs && python3 tools/sync-sketch-headers.py --check && python3 tools/test-steering.py && python3 tools/test-powertrain.py && python3 tools/test-reverse-link.py && python3 tools/test-senders.py && python3 tools/test-can-protocol.py && python3 tools/test-control-link.py && python3 tools/test-steering-link.py && python3 tools/test-vehicle-control-link.py",
+    "test:ui": "node tools/smoke-packed.cjs && node tools/smoke-joystick.cjs",
     "dev": "vite",
     "build": "vite build",
     "build:esp": "npm run build && python3 tools/pack-fs.py",

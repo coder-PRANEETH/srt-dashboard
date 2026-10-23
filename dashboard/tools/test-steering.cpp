@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdio>
+#include <initializer_list>
 #include "SteeringControl.h"
 #include "SteeringFeedback.h"
 void command(uint8_t *d, uint8_t dir, uint16_t seq, uint32_t token) {
@@ -8,7 +9,8 @@ void command(uint8_t *d, uint8_t dir, uint16_t seq, uint32_t token) {
 int main() {
   SteeringControl s; uint8_t d[8] = {};
   assert(!s.direction);
-  command(d,1,1,s.token); assert(!s.accept(d,8,99)); assert(!s.direction && s.reason==5);
+  command(d,1,1,s.token); assert(s.accept(d,8,99)); assert(s.direction==1 && !s.feedbackAvailable);
+  s.stop();
   s.setFeedbackAvailable(true);
   command(d,1,1,s.token); assert(s.accept(d,8,100)); assert(s.direction==1);
   assert(!s.accept(d,8,200)); // Replay does not renew the lease.
@@ -17,7 +19,13 @@ int main() {
   command(d,2,2,s.token); assert(s.accept(d,8,500));
   command(d,0,0,0); assert(s.accept(d,8,501)); assert(!s.direction);
   command(d,1,1,s.token); assert(s.accept(d,8,600));
-  d[1]=255; assert(!s.accept(d,8,601)); assert(!s.direction && s.reason==3);
+  d[1]=0; assert(!s.accept(d,8,601)); assert(!s.direction && s.reason==3);
+  for(int pwm=1;pwm<=255;++pwm) {
+    command(d,1,pwm,s.token);d[1]=pwm;
+    assert(s.accept(d,8,602) && s.pwm==pwm);
+    uint8_t status[8];s.status(status);assert(status[1]==pwm && status[3]==2 && steeringOutputValid(status));
+  }
+  command(d,0,0,0);assert(s.accept(d,8,603));
   command(d,1,1,s.token); assert(s.accept(d,8,700));
   command(d,2,2,s.token); assert(!s.accept(d,8,701)); assert(!s.direction); // Release before reversal.
   command(d,1,1,s.token); assert(s.accept(d,8,1000));
@@ -29,8 +37,8 @@ int main() {
   command(d,1,1,s.token); assert(s.accept(d,8,500)); assert(!s.accept(d,7,510)); assert(!s.direction);
   command(d,1,1,s.token); assert(s.accept(d,8,600));
   const auto oldToken=s.token;
-  assert(s.setFeedbackAvailable(false)); assert(!s.direction && s.reason==5 && s.token!=oldToken);
-  s.setFeedbackAvailable(true); assert(!s.accept(d,8,601)); assert(!s.direction);
+  assert(s.setFeedbackAvailable(false)); assert(s.direction==1 && s.token==oldToken);
+  s.setFeedbackAvailable(true); assert(!s.accept(d,8,601)); assert(s.direction==1); // Replay still rejected.
   command(d,0,0,0); s.setFeedbackAvailable(false); assert(s.accept(d,8,602));
   SteeringRelay r;
   assert(!r.accept(1,1,r.token,9,false,100));
@@ -54,15 +62,37 @@ int main() {
   packet.sequence=99; assert(!accept(1101));
   packet.sequence=101; packet.steeringAngle=NAN; assert(!accept(1102));
   packet.steeringAngle=INFINITY; assert(!accept(1103));
-  packet.steeringAngle=180.1f; assert(!accept(1104));
-  packet.steeringAngle=-180.1f; assert(!accept(1105));
+  packet.steeringAngle=270.1f; assert(!accept(1104));
+  packet.steeringAngle=-270.1f; assert(!accept(1105));
   assert(!f.accept((const uint8_t*)&packet,7,1106)); assert(!f.accept(nullptr,8,1107));
   assert(f.receivedAt==1000 && !f.fresh(1250));
   f.status(d,1250); assert(!d[3] && d[2]==250 && !steeringAngleFrameFresh(d,0));
   packet={0,0}; assert(accept(1250)); assert(f.outages==1 && f.fresh(1250)); // Transmitter reboot.
   packet={180,1}; assert(accept(1251)); f.status(d,1251); assert(steeringAngleTenths(d)==1800);
   packet={-180,2}; assert(accept(1252)); f.status(d,1252); assert(steeringAngleTenths(d)==-1800);
+  // Every representable CAN angle in the IMU sender's full range survives.
+  for (int tenths=-2700; tenths<=2700; ++tenths) {
+    packet.steeringAngle=tenths/10.0f; ++packet.sequence;
+    assert(accept(1253)); f.status(d,1253);
+    assert(steeringAngleFrameValid(d) && steeringAngleTenths(d)==tenths);
+  }
+  for (int tenths : {-2701,2701}) {
+    const uint16_t encoded=(uint16_t)tenths;
+    d[0]=encoded>>8; d[1]=encoded;
+    assert(!steeringAngleFrameValid(d));
+  }
   SteeringFeedback wrapped;
+  SteeringFeedback hornFeedback;
+  IMUDataWithHorn hornPacket={270,1,1};
+  assert(hornFeedback.accept((const uint8_t*)&hornPacket,9,0));
+  assert(hornFeedback.hornAvailable && hornFeedback.hornPressed && hornFeedback.angle==270);
+  hornPacket={-270,2,0}; assert(hornFeedback.accept((const uint8_t*)&hornPacket,9,10));
+  assert(!hornFeedback.hornPressed && hornFeedback.angle==-270);
+  hornPacket.sequence=3;hornPacket.hornPressed=2;
+  assert(!hornFeedback.accept((const uint8_t*)&hornPacket,9,20));
+  assert(!hornFeedback.accept((const uint8_t*)&hornPacket,10,20));
+  packet={0,3};assert(hornFeedback.accept((const uint8_t*)&packet,8,30));
+  assert(!hornFeedback.hornAvailable && !hornFeedback.hornPressed);
   packet={12.3f,0xFFFFFFFF}; assert(wrapped.accept((const uint8_t*)&packet,8,0xFFFFFFF0));
   packet.sequence=0; assert(wrapped.accept((const uint8_t*)&packet,8,100)); assert(wrapped.fresh(349)); assert(!wrapped.fresh(350));
   d[3]=2; assert(!steeringAngleFrameValid(d)); d[3]=1; d[0]=0x7F; assert(!steeringAngleFrameValid(d));

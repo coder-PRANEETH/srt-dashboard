@@ -1,13 +1,20 @@
+import { STEERING_MAX_ANGLE_DEG } from './diagnostics.js'
+
 // One press owns one lease. A stopped/failed gesture is never retried or resumed.
 export function createSteeringClient(onState, fetcher = fetch) {
   let disposed = false, held = null, pollTimer, moveTimer, limitTimer, motionRequest, generation = 0
   let state = { ready: false, direction: null, pwm: null, held: 0, message: 'CONNECTING' }
-  const availabilityMessage = data => data.ready ? '' : data.angleAvailable === false ? 'STEERING ANGLE UNAVAILABLE' : 'NODE 1 UNAVAILABLE'
+  const availabilityMessage = data => {
+    if(data.ready)return data.direction ? 'STEERING ALREADY ACTIVE' : ''
+    if(data.message)return data.message
+    if(data.angleRequired!==false && data.angleAvailable===false && Number.isInteger(data.direction) && data.ageMs<600)return 'UPDATE NODE 5 FIRMWARE'
+    return 'NODE 1 CAN STATUS UNAVAILABLE'
+  }
   const publish = patch => { state = { ...state, ...patch }; if (!disposed) onState(state) }
   async function request(method, params, signal, keepalive = false) {
     const controller = new AbortController(), abort = () => controller.abort()
     signal?.addEventListener('abort', abort, { once: true })
-    const timeout = setTimeout(abort, 250)
+    const timeout = setTimeout(abort, method === 'GET' ? 1000 : 250)
     try {
       const response = await fetcher('/api/steering', { method, cache: 'no-store', signal: controller.signal, keepalive,
         ...(method === 'POST' ? { headers: { 'X-SRT-Control': '1', 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params).toString() } : {}) })
@@ -15,8 +22,10 @@ export function createSteeringClient(onState, fetcher = fetch) {
       const data = await response.json()
       if (typeof data.ready !== 'boolean' || !Number.isInteger(data.token)) throw new Error('CONTROL UNAVAILABLE')
       if (data.ready && (!Number.isInteger(data.direction) || data.direction<0 || data.direction>2 ||
-        data.pwm!==(data.direction?60:0) || data.angleAvailable!==true ||
-        !Number.isFinite(data.angleDeg) || Math.abs(data.angleDeg)>180)) throw new Error('CONTROL UNAVAILABLE')
+        !Number.isInteger(data.pwm) || data.pwm<0 || data.pwm>255 || (data.direction ? !data.pwm : data.pwm!==0))) throw new Error('CONTROL UNAVAILABLE')
+      if(data.angleAvailable!==true || !Number.isFinite(data.angleDeg) || Math.abs(data.angleDeg)>STEERING_MAX_ANGLE_DEG) {
+        data.angleAvailable=false; data.angleDeg=null
+      }
       return data
     } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort) }
   }
@@ -41,13 +50,13 @@ export function createSteeringClient(onState, fetcher = fetch) {
   }
   async function move(gesture) {
     if (disposed || held !== gesture) return
-    motionRequest = new AbortController()
+    const started = Date.now(); motionRequest = new AbortController()
     try {
       const data = await request('POST', { direction: gesture.direction === 1 ? 'left' : 'right', token: gesture.token, seq: ++gesture.sequence }, motionRequest.signal)
       if (held !== gesture || disposed) return
       if (!data.ready || data.token !== gesture.token) { stop('RELEASE & RETRY'); return }
       publish({ ...data, held: gesture.direction, message: '' })
-      moveTimer = setTimeout(() => move(gesture), 80)
+      moveTimer = setTimeout(() => move(gesture), Math.max(0,80-(Date.now()-started)))
     } catch (error) { if (held === gesture && !disposed) stop(error.name === 'AbortError' ? 'CONNECTION LOST' : error.message) }
   }
   poll()

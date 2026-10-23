@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-constexpr float THROTTLE_IDLE_VOLTS = 0.7f;
+constexpr float THROTTLE_IDLE_VOLTS = 0.8f;
 constexpr float THROTTLE_ADC_VOLTS = 3.3f;
 inline float throttleRawVoltage(uint16_t adc) { return adc * (THROTTLE_ADC_VOLTS / 4095.0f); }
 inline float throttleVoltage(uint16_t adc) {
