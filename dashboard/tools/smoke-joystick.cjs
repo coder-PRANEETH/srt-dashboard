@@ -3,9 +3,11 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright')
 const root=path.resolve(__dirname,'../../node5_dash/data'),commands=[]
 let fail=false,lastAt=0,seq=0,replyDelay=0
-const state={ready:true,held:false,token:10,reverse:false,throttlePwm:0,steeringDirection:0,steeringPwm:0,angleDeg:null,appliedThrottlePwm:0,powertrainReason:0,message:''}
+const state={ready:true,held:false,token:10,reverse:false,remoteMode:true,throttlePwm:0,steeringDirection:0,steeringPwm:0,angleDeg:null,appliedThrottlePwm:0,powertrainReason:0,message:''}
 const reset=()=>{state.held=false;state.message='';state.throttlePwm=state.steeringPwm=state.steeringDirection=state.appliedThrottlePwm=0;++state.token;seq=0}
+const hornHttp=require('./horn-http.cjs')(()=>state.remoteMode)
 const server=http.createServer((req,res)=>{
+  if(hornHttp.handle(req,res))return
   const pathname=new URL(req.url,'http://localhost').pathname
   if(pathname==='/api/joystick'){
     if(state.held&&Date.now()-lastAt>=350)reset()
@@ -37,9 +39,35 @@ const server=http.createServer((req,res)=>{
     await page.goto(`http://127.0.0.1:${server.address().port}/control`)
     const pad=page.getByRole('application',{name:'Drive joystick'})
     await page.waitForFunction(()=>document.querySelector('.joystick-pad')?.getAttribute('aria-disabled')==='false')
+    const horn=page.getByRole('button',{name:'Hold horn to sound'})
+    const hornResponse=action=>page.waitForResponse(r=>r.url().endsWith('/api/horn')&&r.request().method()==='POST'&&new URLSearchParams(r.request().postData()).get('action')===action)
+    await page.waitForFunction(()=>!document.querySelector('.horn-hold')?.disabled)
+    await horn.scrollIntoViewIfNeeded();let hb=await horn.boundingBox()
+    let hornEvent=hornResponse('press');await page.mouse.move(hb.x+hb.width/2,hb.y+hb.height/2);await page.mouse.down();await hornEvent
+    assert.equal(hornHttp.state.active,true);await hornResponse('press')
+    hornEvent=hornResponse('stop');await page.mouse.up();await hornEvent;assert.equal(hornHttp.state.active,false)
+    await page.waitForFunction(()=>!document.querySelector('.horn-hold')?.disabled)
+    hornEvent=hornResponse('press');await horn.focus();await page.keyboard.down('Enter');await hornEvent
+    hornEvent=hornResponse('stop');await page.evaluate(()=>window.dispatchEvent(new Event('blur')));await hornEvent;await page.keyboard.up('Enter');assert.equal(hornHttp.state.active,false)
+    await page.waitForFunction(()=>!document.querySelector('.horn-hold')?.disabled)
+    hornEvent=hornResponse('press');await horn.focus();await page.keyboard.down(' ');await hornEvent
+    hornEvent=hornResponse('stop');await page.getByRole('button',{name:'STOP',exact:true}).dispatchEvent('pointerdown');await hornEvent;await page.keyboard.up(' ');assert.equal(hornHttp.state.active,false)
+    await page.evaluate(()=>scrollTo(0,0))
     const response=action=>page.waitForResponse(r=>r.url().endsWith('/api/joystick')&&r.request().method()==='POST'&&new URLSearchParams(r.request().postData()).get('action')===action)
     const values=async(t,s)=>page.waitForFunction(([t,s])=>document.querySelector('[data-testid=throttle-command]')?.textContent===String(t)&&document.querySelector('[data-testid=steering-command]')?.textContent===String(s),[t,s])
     let b=await pad.boundingBox(),cx=b.x+b.width/2,cy=b.y+b.height/2,r=(b.width-64)/2
+    await page.waitForFunction(()=>!document.querySelector('.horn-hold')?.disabled)
+    hb=await horn.boundingBox()
+    const hornTouch=await context.newCDPSession(page),hp={id:71,x:hb.x+hb.width/2,y:hb.y+hb.height/2},jp={id:72,x:cx,y:cy-r}
+    hornEvent=hornResponse('press');await hornTouch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[hp]});await hornEvent
+    let simultaneous=response('move');await hornTouch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[hp,jp]});await simultaneous
+    assert.equal(hornHttp.state.active,true);assert.equal(state.held,true)
+    simultaneous=response('stop');await hornTouch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[jp]});await simultaneous
+    assert.equal(hornHttp.state.active,true,'Releasing joystick preserves held horn')
+    hornEvent=hornResponse('stop');await hornTouch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});await hornEvent;assert.equal(hornHttp.state.active,false)
+    await page.waitForFunction(()=>!document.querySelector('.horn-hold')?.disabled)
+    hb=await horn.boundingBox();hornEvent=hornResponse('press');await page.mouse.move(hb.x+hb.width/2,hb.y+hb.height/2);await page.mouse.down();await hornEvent
+    hornEvent=hornResponse('stop');await page.mouse.move(1,1);await hornEvent;await page.mouse.up();assert.equal(hornHttp.state.active,false)
     let event=response('move');await page.mouse.move(cx,cy);await page.mouse.down();await event
     await page.mouse.move(cx+r,cy-r);await values(180,180);await response('move')
     assert.equal(commands.at(-1).throttle,'180');assert.equal(commands.at(-1).steering,'180');assert.equal(commands.at(-1).direction,'2')
@@ -88,6 +116,6 @@ const server=http.createServer((req,res)=>{
       if(width===390)await page.screenshot({path:'/tmp/srt-joystick-mobile.png',animations:'disabled'})
     }
     assert.deepEqual(errors,[])
-    console.log('Packed joystick passed: touch edges/corners with 270 ms ACK, compass/diagonal PWM, continuous speed changes, keyboard, adjustable limits, release/STOP/cancel/blur, no resume after failure, phone/landscape layouts')
+    console.log('Packed joystick passed: horn press/release/cancel/blur/STOP, independent simultaneous joystick + horn, touch edges/corners with 270 ms ACK, compass/diagonal PWM, continuous speed changes, keyboard, adjustable limits, release/STOP/cancel/blur, no resume after failure, phone/landscape layouts')
   }finally{await browser.close();server.close()}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1})

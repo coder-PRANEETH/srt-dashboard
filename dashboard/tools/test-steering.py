@@ -20,6 +20,7 @@ void portENTER_CRITICAL(portMUX_TYPE*){}
 void portEXIT_CRITICAL(portMUX_TYPE*){}
 uint32_t clockMs=100;
 uint32_t millis(){return clockMs;}
+constexpr int HIGH=1, LOW=0, OUTPUT=1;
 struct SerialMock {
   std::deque<char> input;
   int available(){return input.size();}
@@ -28,6 +29,8 @@ struct SerialMock {
   void println(const char*){}
 } Serial;
 int pins[40] = {};
+void pinMode(uint8_t,int){}
+void digitalWrite(uint8_t pin,int value){assert(pin==13);pins[pin]=value;}
 void analogWrite(uint8_t pin,int value){
   assert(pin==32 || pin==33); assert(value>=0 && value<=255);
   pins[pin]=value; assert(!(pins[32] && pins[33]));
@@ -46,6 +49,20 @@ int main(){
   IMUData packet={25.5f,10};
   onSteeringAngle(nullptr,(const uint8_t*)&packet,sizeof(packet)); serviceSteering();
   assert(steeringFeedback.angle==25.5f && steering.feedbackAvailable);
+  IMUDataWithHorn horn={0,11,1};
+  onSteeringAngle(nullptr,(const uint8_t*)&horn,sizeof(horn));serviceSteering();serviceHornRelay();assert(pins[13]==HORN_RELAY_ON);
+  horn.sequence=12;horn.hornPressed=0;
+  onSteeringAngle(nullptr,(const uint8_t*)&horn,sizeof(horn));serviceSteering();serviceHornRelay();assert(pins[13]==HORN_RELAY_OFF);
+  IMUDataWithHornValidity fault={0,13,1,0};
+  onSteeringAngle(nullptr,(const uint8_t*)&fault,sizeof(fault));serviceSteering();
+  assert(pins[13]==HORN_RELAY_ON && !steeringFeedback.fresh(clockMs) && !steering.feedbackAvailable);
+  uint8_t hornFrame[8];steeringFeedback.hornStatus(hornFrame,clockMs);
+  assert(wirelessHornFrameValid(hornFrame) && hornFrame[0]==1 && hornFrame[1]==3);
+  ++fault.sequence;fault.hornPressed=0;onSteeringAngle(nullptr,(const uint8_t*)&fault,sizeof(fault));serviceSteering();
+  assert(pins[13]==HORN_RELAY_OFF);
+  horn.sequence=15;horn.hornPressed=1;
+  onSteeringAngle(nullptr,(const uint8_t*)&horn,sizeof(horn));serviceSteering();
+  steeringFeedback.receivedAt=clockMs-STEERING_FEEDBACK_TIMEOUT_MS;serviceHornRelay();assert(pins[13]==HORN_RELAY_OFF);
   steeringWrite32(d+4,steering.token);
   steering.accept(d,8,clockMs); applySteering(); assert(pins[32]==60 && pins[33]==0);
   for(int pwm=1;pwm<=255;++pwm){d[1]=pwm;d[2]=pwm+1;d[3]=(pwm+1)>>8;assert(steering.accept(d,8,clockMs));applySteering();assert(pins[32]==pwm && !pins[33]);}
@@ -99,7 +116,7 @@ int main(){
 '''
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
-    for name, cpp in [('state', root / 'dashboard/tools/test-steering.cpp'), ('outputs', tmp / 'outputs.cpp')]:
-        if name == 'outputs': cpp.write_text(shim + receiver + adapter + scenario)
-        subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-I',str(root / 'node1_bcm'),str(cpp),'-o',str(tmp/name)],check=True)
+    for name, cpp in [('state', root / 'dashboard/tools/test-steering.cpp'), ('outputs', tmp / 'outputs.cpp'), ('outputs-low',tmp/'outputs-low.cpp')]:
+        if name.startswith('outputs'): cpp.write_text(shim + receiver + adapter + scenario)
+        subprocess.run(['g++','-std=c++17','-Wall','-Wextra',f'-DNODE1_HORN_ACTIVE_LOW={int(name=="outputs-low")}', '-I',str(root / 'node1_bcm'),str(cpp),'-o',str(tmp/name)],check=True)
         subprocess.run([str(tmp/name)],check=True)

@@ -2,7 +2,7 @@
 // relay logic are covered separately by test-control-link.py.
 void testDrive() {
   RemoteDriveGate pedal,switches,motor;
-  uint16_t physicalPedal=930; uint8_t physicalSwitches=0,duty=DRIVE_REST_PWM;
+  uint16_t physicalPedal=930; uint8_t physicalSwitches=SWITCH_REMOTE_MODE,duty=DRIVE_REST_PWM;
   size_t delivered=outgoing.size();
   auto bus=[&]() {
     while(delivered<outgoing.size()) {
@@ -20,6 +20,7 @@ void testDrive() {
     Input p{},s{},m{},out{};p.id=0x121;s.id=0x122;m.id=0x124;out.id=0x201;p.len=s.len=m.len=out.len=8;
     pedal.status(p.data,physicalPedal);switches.status(s.data,physicalSwitches);motor.status(m.data,duty);
     out.data[2]=motor.reverse;
+    push(0x300,{physicalSwitches});
     incoming.push_back(p);incoming.push_back(s);incoming.push_back(m);incoming.push_back(out);readCan();
   };
   auto command=[&](const char *action,uint32_t seq=1,uint32_t percent=25) {
@@ -45,20 +46,23 @@ void testDrive() {
   command("reverse");bus();assert(server.code==200 && drive.held && drive.shiftOnly);
   for(int seq=2;seq<10 && drive.held;++seq){clockMs+=50;bus();command("reverse",seq);bus();}
   assert(!drive.held && motor.reverse && duty==62);handback();assert(pedal.phase==2);
-  physicalSwitches=SWITCH_REVERSE;handback();assert(!drive.session && pedal.phase==0);
-  command("throttle");bus();clockMs+=350;bus();serviceDrive();bus();assert(!drive.held && duty==62 && pedal.phase==2);
+  physicalSwitches=SWITCH_REMOTE_MODE|SWITCH_REVERSE;handback();assert(!drive.session && pedal.phase==0);
+  command("throttle");bus();const auto expires=drive.lastHttp+DRIVE_HTTP_LEASE_MS;
+  while(clockMs<expires) {clockMs+=std::min<uint32_t>(50,expires-clockMs);bus();serviceDrive();bus();}
+  assert(!drive.held && duty==62 && pedal.phase==2);
   command("throttle");bus();clockMs+=50;bus();serviceDrive();assert(drive.held); // Intentional new gesture.
   clockMs+=260;serviceDrive();assert(!drive.held); // Stale CAN cannot renew.
   handback();bus();command("throttle");bus();txWorks=false;clockMs+=50;bus();serviceDrive();assert(!drive.held);txWorks=true;
   handback();
   // Partial ownership must never inject a false pedal to complete its own claim.
   drive=DriveHost{};pedal=RemoteDriveGate{};switches=RemoteDriveGate{};motor=RemoteDriveGate{};
-  delivered=outgoing.size();physicalPedal=930;physicalSwitches=0;clockMs+=1000;bus();command("throttle");
-  physicalPedal=1200;bus();assert(pedal.phase==0 && switches.phase==1 && motor.phase==0);
+  delivered=outgoing.size();physicalPedal=930;physicalSwitches=SWITCH_REMOTE_MODE;clockMs+=1000;bus();command("throttle");
+  physicalPedal=1241;bus();assert(pedal.phase==0 && switches.phase==1 && motor.phase==0);
   stopDrive();bus();assert(switches.phase==2);physicalPedal=930;handback();assert(!drive.session);
   command("throttle");bus();const auto heldToken=drive.token;
   for(int n=1;n<50;++n){clockMs+=100;bus();command("throttle",n+1);assert(drive.held);}
-  clockMs+=100;bus();serviceDrive();assert(!drive.held && drive.token!=heldToken);
+  clockMs+=100;bus();serviceDrive();assert(drive.held && drive.token==heldToken);
+  clockMs+=350;bus();serviceDrive();assert(!drive.held);
   // Time arithmetic and released-session rejection across millis wrap.
   RemoteDriveGate wrap;old[6]=1;driveWrite32(old+2,99);
   assert(wrap.accept(old,8,1,true,false,0xFFFFFFF0));wrap.tick(100);assert(wrap.phase==1);

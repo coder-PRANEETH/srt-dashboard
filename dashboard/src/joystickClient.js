@@ -1,10 +1,11 @@
 import { validJoystickCommand } from './joystickModel.js'
 
 export function createJoystickClient(onState,fetcher=fetch) {
-  let disposed=false,gesture=null,generation=0,pollTimer,moveTimer,holdTimer,motionRequest,pollRequest
-  let state={ready:false,held:false,active:false,token:0,reverse:false,message:'CONNECTING'}
+  let disposed=false,gesture=null,generation=0,pollTimer,moveTimer,motionRequest,pollRequest,pollFailures=0,throttleEnabled=true
+  let state={ready:false,held:false,active:false,token:0,reverse:false,remoteMode:null,message:'CONNECTING'}
   const publish=patch=>{state={...state,...patch};if(!disposed)onState(state)}
-  const apply=data=>({...data,active:data.held,held:!!gesture})
+  const apply=data=>({...data,active:data.held,held:!!gesture,throttleBlocked:!!gesture?.throttleBlocked})
+  const commandFor=(command,blocked)=>blocked?{...command,throttle:0}:command
   async function request(method,params,signal,keepalive=false) {
     // Motion stays below the 350 ms firmware lease; status/STOP can wait longer.
     const controller=new AbortController(),abort=()=>controller.abort(),timer=setTimeout(abort,method==='GET'||params?.action==='stop'?1000:300)
@@ -14,12 +15,12 @@ export function createJoystickClient(onState,fetcher=fetch) {
         ...(method==='POST'?{headers:{'X-SRT-Control':'1','Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(params).toString()}:{})})
       if(!response.ok)throw new Error(response.status===409?'RELEASE & RETRY':'CONTROL UNAVAILABLE')
       const data=await response.json()
-      if(typeof data.ready!=='boolean'||typeof data.held!=='boolean'||typeof data.reverse!=='boolean'||!Number.isInteger(data.token))throw new Error('INVALID CONTROL RESPONSE')
+      if(typeof data.ready!=='boolean'||typeof data.held!=='boolean'||typeof data.reverse!=='boolean'||(data.remoteMode!==null&&typeof data.remoteMode!=='boolean')||!Number.isInteger(data.token))throw new Error('INVALID CONTROL RESPONSE')
       return data
     } finally {clearTimeout(timer);signal?.removeEventListener('abort',abort)}
   }
   async function stop(message='') {
-    const before=++generation;pollRequest?.abort();gesture=null;clearTimeout(moveTimer);clearTimeout(holdTimer);motionRequest?.abort();pollRequest?.abort()
+    const before=++generation;pollRequest?.abort();gesture=null;clearTimeout(moveTimer);motionRequest?.abort();pollRequest?.abort()
     publish({ready:false,held:false,active:false,throttlePwm:0,appliedThrottlePwm:null,steeringPwm:null,message})
     try {const data=await request('POST',{action:'stop'},null,true);if(before===generation)publish({...apply(data),message:message||data.message})}
     catch {if(before===generation)publish({ready:false,appliedThrottlePwm:null,steeringPwm:null,angleDeg:null,message:'CONNECTION LOST'})}
@@ -40,20 +41,21 @@ export function createJoystickClient(onState,fetcher=fetch) {
     if(disposed)return
     const before=generation
     if(!gesture) {
-      try {pollRequest=new AbortController();const data=await request('GET',null,pollRequest.signal);if(before===generation&&!gesture)publish(apply(data))}
-      catch {if(before===generation)publish({ready:false,appliedThrottlePwm:null,steeringPwm:null,angleDeg:null,message:'CONNECTION LOST'})}
+      try {pollRequest=new AbortController();const data=await request('GET',null,pollRequest.signal);pollFailures=0;if(before===generation&&!gesture)publish(apply(data))}
+      catch {if(before===generation&&++pollFailures>=3)publish({ready:false,appliedThrottlePwm:null,steeringPwm:null,angleDeg:null,message:'CONNECTION LOST'})}
     }
     if(!disposed)pollTimer=setTimeout(poll,250)
   }
   poll()
   return {
     start(command) {
-      if(disposed||gesture||!state.ready||state.active||!validJoystickCommand(command))return false
-      ++generation;pollRequest?.abort();gesture={token:state.token,seq:0,command}
-      publish({held:true,active:true,message:'TAKING REMOTE CONTROL'})
-      holdTimer=setTimeout(()=>stop('RELEASE & RETRY'),4900);move(gesture);return true
+      if(disposed||gesture||state.remoteMode!==true||!state.ready||state.active||!validJoystickCommand(command))return false
+      ++generation;pollRequest?.abort();gesture={token:state.token,seq:0,command:commandFor(command,!throttleEnabled),throttleBlocked:!throttleEnabled}
+      publish({held:true,active:true,throttleBlocked:gesture.throttleBlocked,message:'TAKING REMOTE CONTROL'})
+      move(gesture);return true
     },
-    update(command){if(!gesture||!validJoystickCommand(command))return false;gesture.command=command;return true},
+    update(command){if(!gesture||!validJoystickCommand(command))return false;gesture.command=commandFor(command,gesture.throttleBlocked||!throttleEnabled);return true},
+    setMobile(enabled){throttleEnabled=enabled;if(!enabled&&gesture){gesture.throttleBlocked=true;gesture.command=commandFor(gesture.command,true);publish({throttleBlocked:true})}},
     stop,
     dispose(){if(disposed)return;disposed=true;clearTimeout(pollTimer);stop()},
   }

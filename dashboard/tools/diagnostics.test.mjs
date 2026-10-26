@@ -32,18 +32,18 @@ test('decode actual short payloads, zero and malformed frames', () => {
   assert.match(frame(0x300,[0x25]).text,/Cruise ON · HillHold OFF · Autonomous ON · Remote mode OFF · Horn OFF · Reverse ON/)
   assert.equal(frame(0x301,[0,16]).issue,true)
   assert.equal(frame(0x301,[0,0,0,0,0,0,0,0]).issue,true)
-  assert.equal(frame(0x500,[1,90,0,0,0,0,0,0]).issue,true)
+  assert.equal(frame(0x500,[1,90,0,0,0,0,0,0]).kind,'Unknown frame')
   assert.equal(frame(0x600,[4,0,0,2,0,0,0,0]).issue,true)
-  assert.equal(frame(0x400,[90,1,0,79,0,0,1,8]).issue,true)
+  assert.equal(frame(0x400,[90,1,0,79,0,0,1,8]).node,null)
   assert.equal(display(null),'—');assert.equal(display(0),'0')
 })
 test('exact hex and combined local filters', () => {
   assert.equal(parseId(' 0X00000301 '),0x301)
   for(const s of ['0x','301junk','20000000','-1'])assert.equal(parseId(s),null)
   assert.equal(parseId(''),undefined)
-  const decoded=[frame(0x301,[0xd0,7]),frame(0x300,[0x25]),frame(0x500,[1,90,0,0,0,0,0,0])]
+  const decoded=[frame(0x301,[0xd0,7]),frame(0x300,[0x25]),frame(0x201,[0,0,0,24,0,0,0,3])]
   assert.equal(filterFrames(decoded,{node:'1',query:'d0 07',id:'301'}).length,1)
-  assert.equal(filterFrames(decoded,{issues:true})[0].id,0x500)
+  assert.equal(filterFrames(decoded,{issues:true})[0].id,0x201)
   assert.equal(filterFrames(decoded,{id:'xyz'}).length,0)
 })
 test('wireless steering frame and diagnostics preserve signed angle and reject invalid data',()=>{
@@ -52,7 +52,7 @@ test('wireless steering frame and diagnostics preserve signed angle and reject i
   for(const data of [[0,0,255,0,0,0,0,0],[0,0,0,2,0,0,0,0],[0x7F,0xFF,0,1,0,0,0,0]])assert.equal(frame(0x100,data).issue,true)
   assert.equal(frame(0x100,[0,0]).issue,true)
   assert.match(frame(0x111,[0,0,5,1,9,0,0,0]).text,/steering angle unavailable/)
-  for(const [id,data] of [[0x300,[128]],[0x201,[2,0,0,0,0,0,0,0]],[0x401,[2,0,0,0,0,0,0,0]],[0x500,[0,90,0,2,0,0,0,0]],[0x400,[10,0,0,79,0,0,2,8]]])assert.equal(frame(id,data).issue,true)
+  for(const [id,data] of [[0x300,[128]],[0x201,[2,0,0,0,0,0,0,0]]])assert.equal(frame(id,data).issue,true)
   const feeds={vehicle:{at:1000,data:{steeringDeg:-45.3,steeringLink:true,steeringAgeMs:10}}}
   let model=diagnosticsModel(feeds,1000)
   assert.equal(model.nodes[0].sensors.find(s=>s.name==='Steering angle').value,'-45.3°')
@@ -71,11 +71,12 @@ test('wireless steering frame and diagnostics preserve signed angle and reject i
   assert.ok(model.faults.some(f=>f.key==='steering-angle'))
 })
 test('receive-only nodes stay unknown; stale APIs never report online', () => {
-  const feeds={vehicle:{at:1000,data:{canReady:true,nodes:[{id:1,alive:true,ageMs:10},{id:2,alive:true},{id:4,alive:true,ageMs:10,error:2,status:0}],pitchValid:false}}}
+  const feeds={vehicle:{at:1000,data:{canReady:true,nodes:[{id:1,alive:true,ageMs:10},{id:2,alive:true},{id:5,alive:true,ageMs:0,error:1,status:0}]}}}
   const live=diagnosticsModel(feeds,1500)
   assert.equal(live.nodes[1].state,'UNKNOWN')
   assert.equal(live.nodes[3].state,'FAULT')
-  assert.ok(live.faults.some(f=>f.key==='imu'))
+  assert.deepEqual(live.nodes.map(n=>n.id),[1,2,3,5])
+  assert.ok(!live.faults.some(f=>f.key==='imu'))
   const stale=diagnosticsModel(feeds,5000)
   assert.equal(stale.connected,false)
   assert.ok(stale.nodes.every(n=>n.state==='UNKNOWN'))
@@ -97,7 +98,7 @@ test('Node 2 output commands and heartbeat are observable when supplied', () => 
   model=diagnosticsModel(feeds,1000);assert.equal(model.nodes[1].state,'OFFLINE')
 })
 test('Node 2 names every stop reason, including disabled outputs and idle interlocks', () => {
-  const names=['ready','CAN unavailable / TX failure','PWM setup / write failure','pedal missing / stale / invalid','switches missing / stale / invalid','release pedal to resume','direction change / settling','traction outputs disabled','reverse relays disabled','remote command missing / expired']
+  const names=['ready','CAN unavailable / TX failure','PWM setup / write failure','pedal missing / stale / invalid','switches missing / stale / invalid','release pedal to resume','direction change / settling','traction outputs disabled','reverse relays disabled','remote command missing / expired','hill assist unavailable: chassis pitch required']
   for(const [reason,name] of names.entries()) {
     assert.ok(frame(0x201,[0,0,0,0,0,0,0,reason]).text.includes(name))
     assert.ok(frame(0x600,[2,reason?0:1,0,reason,0,0,0,0]).text.includes(name))
@@ -154,4 +155,30 @@ test('remote frames are tagged as host commands; handoff failures and physical s
   assert.equal(model.nodes[2].sensors[5].value,'ON')
   assert.ok(model.faults.some(f=>f.key==='drive-gate-3'))
   assert.ok(model.faults.some(f=>f.key==='remote-drive'))
+})
+
+test('GPS belongs to local Node 5 and reports UART reception independently of CAN',()=>{
+  const gps={fix:true,source:'local-uart',lat:-33.833333,lon:-151.2,sats:14,ageMs:20,receiving:true,rxAgeMs:10,passedChecksum:10,failedChecksum:1,charsProcessed:500,hdop:1.2}
+  const feeds={gps:{at:1000,data:gps},vehicle:{at:1000,data:{canReady:false,nodes:[{id:5,alive:false}]}}}
+  let model=diagnosticsModel(feeds,1100)
+  assert.deepEqual(model.nodes.map(n=>n.id),[1,2,3,5])
+  assert.equal(model.nodes[3].sensors.find(s=>s.name==='GPS receiver').state,'LIVE')
+  assert.ok(!model.nodes.flatMap(n=>n.sensors).some(s=>/Ignition|MPU6050/.test(s.name)))
+  assert.ok(!model.faults.some(f=>f.key==='gps'))
+  gps.fix=false;gps.sats=0
+  model=diagnosticsModel(feeds,1100)
+  assert.equal(model.nodes[3].sensors.find(s=>s.name==='GPS satellites').value,'0')
+  assert.equal(model.faults.find(f=>f.key==='gps').node,5)
+  assert.match(model.nodes[3].sensors[0].detail,/waiting for satellite fix/)
+  gps.receiving=false
+  assert.match(diagnosticsModel(feeds,1100).nodes[3].sensors[0].detail,/No recent UART data/)
+})
+
+test('wheel pitch is display-only and hill blockage has an explicit powertrain reason',()=>{
+  const pitch=frame(0x102,[0xff,0xa6,10,1,99,0,0,0])
+  assert.equal(pitch.node,1);assert.equal(pitch.issue,false);assert.match(pitch.text,/Wheel pitch -9.0°.*not chassis pitch/)
+  assert.equal(frame(0x102,[0x7f,0xff,0,1,0,0,0,0]).issue,true)
+  const model=diagnosticsModel({vehicle:{at:1000,data:{wheelPitchDeg:9,wheelPitchValid:true,switches:{hill:true},powertrainReason:10,nodes:[{id:2,alive:true,source:'heartbeat',status:0,error:10}]}}},1000)
+  assert.equal(model.nodes[0].sensors.find(s=>s.name==='Wheel pitch').value,'9.0°')
+  assert.match(model.nodes[1].sensors.find(s=>s.name==='Motor stop reason').value,/chassis pitch required/)
 })

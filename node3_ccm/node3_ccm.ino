@@ -16,6 +16,7 @@
 #include <SPI.h>
 #include <mcp_can.h>
 #include "RemoteDrive.h"
+#include "CanRecovery.h"
 
 #define DPDT1_A  4
 #define DPDT1_B  5
@@ -56,6 +57,8 @@ RemoteDriveGate driveGate;
 uint32_t driveStatusAt=0;
 
 bool canReady = false;
+CanRecovery canRecovery;
+bool canFaultHandled=false;
 unsigned long txOK = 0, txFailed = 0, lastTxAt = 0;
 bool sendPending = true;
 unsigned long lastSend = 0;
@@ -78,6 +81,7 @@ void receiveDriveGate() {
   for(uint8_t n=0;n<4 && CAN.checkReceive()==CAN_MSGAVAIL;++n) {
     unsigned long id=0; byte len=0,data[8]={};
     if(CAN.readMsgBuf(&id,&len,data)!=CAN_OK) break;
+    canRecovery.received(millis());
     if(id==DRIVE_GATE_ID) {
       const bool releaseMatches=bool(buildPayload()&SWITCH_REVERSE)==driveGate.reverse;
       driveGate.accept(data,len,3,data[0]==1 || releaseMatches,false,millis());
@@ -88,7 +92,7 @@ void receiveDriveGate() {
 void sendDriveGateStatus() {
   if(millis()-driveStatusAt<100) return;
   byte data[8]; driveGate.status(data,buildPayload()); driveStatusAt=millis();
-  if(CAN.sendMsgBuf(DRIVE_SWITCH_STATUS_ID,0,8,data)==CAN_OK) { ++txOK; lastTxAt=millis(); }
+  if(canRecovery.send(CAN,canReady,DRIVE_SWITCH_STATUS_ID,8,data,millis())) { ++txOK; lastTxAt=millis(); }
   else { ++txFailed; driveGate.lock(); }
 }
 void printSwitchStates(byte payload) {
@@ -106,6 +110,7 @@ void initializeCAN() {
   if (CAN.begin(MCP_ANY, CAN_SPEED, CAN_CRYSTAL) == CAN_OK &&
       CAN.setMode(MCP_NORMAL) == CAN_OK) {
     canReady = true;
+    canRecovery.started(millis()); canFaultHandled=false;
     sendPending = true;
     Serial.println("CAN initialized: ID 0x300, DLC 1");
   } else {
@@ -136,6 +141,13 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+  canRecovery.poll(CAN,canReady,now,canReady && CAN.checkReceive()==CAN_MSGAVAIL);
+  if(!canReady && !canFaultHandled) {
+    canFaultHandled=true; driveGate.lock(); sendPending=true;
+    Serial.printf("CAN recovery: %s EFLG=0x%02X TEC=%u REC=%u | faults=%lu resets=%lu; retry in 1 s\n",
+      canRecovery.message(),canRecovery.errorFlags,canRecovery.txErrors,canRecovery.rxErrors,
+      (unsigned long)canRecovery.faults,(unsigned long)canRecovery.restarts);
+  }
 
   for (byte i = 0; i < SWITCH_COUNT; i++) {
     bool current = (digitalRead(switchPins[i]) == LOW);
@@ -157,7 +169,7 @@ void loop() {
   }
 
   if (!canReady) {
-    if (now - lastAttempt >= 1000) {
+    if (canRecovery.retryDue(now,lastAttempt)) {
       initializeCAN();
     }
     delay(1);
@@ -165,10 +177,10 @@ void loop() {
   }
 
   receiveDriveGate(); sendDriveGateStatus();
-  if (driveGate.phase!=1 && (sendPending || now - lastSend >= (driveGate.phase ? 100 : SEND_INTERVAL_MS))) {
+  if (canReady && driveGate.phase!=1 && (sendPending || now - lastSend >= (driveGate.phase ? 100 : SEND_INTERVAL_MS))) {
     byte payload = driveGate.phase ? driveSwitchMask(buildPayload(),driveGate.reverse) : buildPayload();
 
-    if (CAN.sendMsgBuf(SWITCH_CAN_ID, 0, 1, &payload) == CAN_OK) {
+    if (canRecovery.send(CAN,canReady,SWITCH_CAN_ID,1,&payload,millis())) {
       ++txOK; lastTxAt = millis();
       Serial.printf("[%lu ms] CAN TX ID=0x300 DLC=1 | ", millis());
       printSwitchStates(payload);
@@ -177,7 +189,7 @@ void loop() {
     } else {
       ++txFailed;
       sendPending = true;
-      // Retry on the next loop without repeatedly reinitializing CAN.
+      // Recovery aborts this old frame and retries the controller after backoff.
     }
   }
 

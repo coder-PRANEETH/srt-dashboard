@@ -4,3 +4,6 @@
 
 # Temporary Superdesign previews
 .superdesign/tmp/
+
+# Python test caches
+**/__pycache__/

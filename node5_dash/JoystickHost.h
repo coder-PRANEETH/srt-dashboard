@@ -8,15 +8,19 @@ void sendJoystickState() {
   readCan(); serviceDrive(); serviceSteeringRelay();
   const Sample *steer=sampleFor(STEERING_STATUS_ID), *angle=sampleFor(STEERING_ANGLE_ID), *motor=sampleFor(0x201);
   const bool capable=joystickCapable(), ready=capable && driveReady();
+  const bool remoteModeKnown=driveRemoteModeKnown(),remoteMode=driveRemoteModeEnabled();
   const bool steerLive=steeringNodeReady(), motorLive=fresh(motor,250);
   const bool angleLive=fresh(angle,STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(angle->bytes,millis()-angle->at);
   const char *message=drive.reason;
-  if(!capable) message="WAITING FOR CONTROL NODES";
+  if(!remoteModeKnown) message="WAITING FOR REMOTE MODE SWITCH";
+  else if(!remoteMode) message="TURN ON REMOTE MODE SWITCH";
+  else if(driveHillSelected()) message="HILL ASSIST UNAVAILABLE: CHASSIS PITCH REQUIRED";
+  else if(!capable) message="WAITING FOR CONTROL NODES";
   else if(!drive.held && !drivePedalIdle()) message="RELEASE PHYSICAL PEDAL";
   else if(drive.held && !drive.paired) message="TAKING REMOTE CONTROL";
   else if(drive.held && (drive.shiftPhase || (motorLive && motor->bytes[7]==6))) message="DIRECTION CHANGE / SETTLING";
   else if(drive.held) message="REMOTE ACTIVE / PHYSICAL PEDAL BLOCKED";
-  String j="{\"ready\":"+String(ready?"true":"false")+",\"token\":"+String(drive.token);
+  String j="{\"ready\":"+String(ready?"true":"false")+",\"remoteMode\":"+maybeBool(remoteModeKnown,remoteMode)+",\"token\":"+String(drive.token);
   j+=",\"held\":"+String(drive.held && drive.steeringOwned?"true":"false")+",\"reverse\":"+String(drive.reverse?"true":"false");
   j+=",\"throttlePwm\":"+String(drive.pwm)+",\"steeringDirection\":"+maybeNumber(steerLive,steer->bytes[0]);
   j+=",\"steeringPwm\":"+maybeNumber(steerLive,steer->bytes[1]);
@@ -24,7 +28,7 @@ void sendJoystickState() {
   j+=",\"angleDeg\":"+maybeNumber(angleLive,steeringAngleTenths(angle->bytes)/10.0f,1);
   j+=",\"appliedThrottlePwm\":"+maybeNumber(fresh(sampleFor(0x124),250),le16(sampleFor(0x124)->bytes+1));
   j+=",\"powertrainReason\":"+maybeNumber(motorLive,motor->bytes[7]);
-  j+=",\"message\":\""+String(message)+"\",\"timeoutMs\":350,\"holdMs\":5000}";
+  j+=",\"message\":\""+String(message)+"\",\"timeoutMs\":350}";
   server.sendHeader("Cache-Control","no-store"); server.send(200,"application/json",j);
 }
 bool sendJoystickSteering(uint8_t direction,uint8_t pwm,uint16_t seq) {
@@ -71,7 +75,8 @@ void handleJoystickCommand() {
   else if(drive.reverse!=bool(reverse)) {
     drive.reverse=reverse; drive.shiftPhase=1; drive.shiftSent=false; drive.lastTx=millis()-50;
   }
-  drive.pwm=pwm; drive.percent=(pwm*100+127)/255; drive.httpSeq=seq; drive.lastHttp=millis();
+  drive.pwm=mobilityEnabled() && drive.session!=mobilityBlockedSession?pwm:0;
+  drive.percent=(drive.pwm*100+127)/255; drive.httpSeq=seq; drive.lastHttp=millis();
   serviceDrive();
   if(drive.held && drive.paired && !sendJoystickSteering(direction,steeringPwm,seq)) stopDrive("STEERING / CAN FAULT");
   sendJoystickState();

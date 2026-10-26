@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from gps_test_support import gps_build_flags
 root=Path(__file__).resolve().parents[2]
 def literal(file,name):
     for n in ast.parse((root/file).read_text()).body:
@@ -51,7 +52,7 @@ void step(){
  if(clockMs%100==0){
   Input f{};f.id=0x122;f.len=8;switches.status(f.data,switchMask);receiveHost(f);
   bcm::Frame n{};n.id=f.id;n.len=f.len;memcpy(n.data,f.data,8);bcm::incoming.push_back(n);pcm::receivePowertrain(f.id,f.len,f.data);
-  if(switches.phase!=1){uint8_t mask=switches.phase?driveSwitchMask(switchMask,switches.reverse):switchMask;pcm::receivePowertrain(0x300,1,&mask);}
+  if(switches.phase!=1){uint8_t mask=switches.phase?driveSwitchMask(switchMask,switches.reverse):switchMask;pcm::receivePowertrain(0x300,1,&mask);Input sw{};sw.id=0x300;sw.len=1;sw.data[0]=mask;receiveHost(sw);}
   pcm::sendRemoteMotorStatus();
  }
  pcm::servicePowertrain();if(clockMs%50==0)pcm::sendPowertrainStatus();
@@ -66,7 +67,7 @@ void move(unsigned seq,unsigned throttle,unsigned steering,unsigned direction,bo
  assert(server.code==200 && drive.held);
 }
 int main(){
- setbuf(stdout,nullptr);pcm::setup();bcm::setup();bcm::inputAdc=930;advance(400);
+ setbuf(stdout,nullptr);switchMask=SWITCH_REMOTE_MODE;pcm::setup();bcm::setup();bcm::inputAdc=930;advance(400);
  server.headers["X-SRT-Control"]="1";assert(joystickCapable());
  for(unsigned sweep=0;sweep<3;++sweep){
   unsigned seq=1;move(seq++,0,0,0);advance(150);
@@ -79,11 +80,26 @@ int main(){
   stopDrive();bus();advance(400);assert(!bcm::pins[32] && !bcm::pins[33] && pcm::pwm[13]==62);
  }
  puts("Actual Node 1 + Node 2 + Node 5 corner/edge sweeps passed: PWM1..255, delayed steering ACKs, reversals, center crossings and idle STOP");
+ // Hold both traction/steering and remote horn beyond the former 5 s cap,
+ // then force Node 1 bus-off while the physical gesture is still renewed.
+ for(unsigned seq=1;seq<=90;++seq){
+  move(seq,255,180,2);
+  server.args={{"action","press"},{"token",String(hornRelay.token)},{"seq",String(seq)}};
+  handleHornCommand();bus();assert(server.code==200);advance(80);
+ }
+ assert(drive.held && pcm::pwm[13]==255 && bcm::hornRelayOn && bcm::pins[33]==180);
+ bcm::canErrorFlags=0x20;advance(100);
+ assert(!bcm::canReady && !bcm::websiteHorn.held && !bcm::hornRelayOn && !bcm::pins[32] && !bcm::pins[33]);
+ advance(300);assert(!drive.held && pcm::pwm[13]==62);
+ bcm::canErrorFlags=0;advance(1200);
+ assert(bcm::canReady && !drive.held && !bcm::websiteHorn.held && !bcm::hornRelayOn && pcm::pwm[13]==62);
+ assert(!bcm::pins[32] && !bcm::pins[33]);
+ puts("Combined remote throttle/steering/horn passed: >7 s continuous hold, forced bus-off, immediate Node 1 stop, traction idle, automatic controller recovery and no motion/horn restart");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
  p=Path(directory)
  if before:(p/'JoystickHost.h').write_text((root/'build/control-logic-before/JoystickHost.h').read_text())
  cpp=p/'vehicle.cpp';cpp.write_text(shim+'\nvoid delay(unsigned n){clockMs+=n;}\nnamespace bcm {\n'+common+io+node+'\n}\nnamespace pcm {\nconstexpr int LOW=0,HIGH=1,OUTPUT=1;\n'+motor_io+motor+'\n}\n'+backend+scenarios)
- binary=p/'vehicle';subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(root/'node5_dash'),str(cpp),'-o',str(binary)],check=True)
+ binary=p/'vehicle';subprocess.run(['g++',*gps_build_flags(Path(directory)),'-std=c++17','-Wall','-Wextra','-Werror','-I',str(root/'node5_dash'),str(cpp),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)

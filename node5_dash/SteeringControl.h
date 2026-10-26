@@ -10,7 +10,6 @@ inline bool steeringOutputValid(const uint8_t *d) {
     (d[3]==2 || (d[3]==1 && d[1]==(d[0]?STEERING_PWM:0)));
 }
 constexpr uint32_t STEERING_TIMEOUT_MS = 350;
-constexpr uint32_t STEERING_HOLD_MS = 5000;
 inline uint32_t steeringRead32(const uint8_t *d) {
   return (uint32_t)d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
 }
@@ -22,7 +21,7 @@ inline void steeringWrite32(uint8_t *d, uint32_t value) {
 // Tokens change after every stop. Delayed commands cannot restart a stopped motor.
 struct SteeringControl {
   uint8_t direction = 0, pwm = 0, reason = 0;
-  uint32_t token = 1, lastCommandAt = 0, heldAt = 0;
+  uint32_t token = 1, lastCommandAt = 0;
   uint16_t sequence = 0;
   bool sequenced = false;
   bool feedbackAvailable = false;
@@ -38,7 +37,6 @@ struct SteeringControl {
   bool tick(uint32_t now) {
     if (!direction) return false;
     if (now - lastCommandAt >= STEERING_TIMEOUT_MS) { stop(2); return true; }
-    if (now - heldAt >= STEERING_HOLD_MS) { stop(4); return true; }
     return false;
   }
   bool accept(const uint8_t *d, uint8_t len, uint32_t now) {
@@ -50,7 +48,7 @@ struct SteeringControl {
     const uint16_t advance = next - sequence;
     if (sequenced && (advance == 0 || advance >= 0x8000)) return false;
     if (direction && direction != d[0]) { stop(3); return false; }
-    if (!direction) heldAt = now;
+    // Valid advancing renewals keep a hold alive; loss still stops in 350 ms.
     direction = d[0]; pwm = d[1]; reason = 0; lastCommandAt = now; sequence = next; sequenced = true;
     return true;
   }
@@ -77,5 +75,33 @@ struct SteeringRelay {
     if (direction && (direction != dir || nodeToken != node)) return false;
     direction = dir; sequence = seq; nodeToken = node; lastCommandAt = now;
     return true;
+  }
+};
+
+// Horn has a renewable lease, with no total hold limit. Website and wireless
+// buttons are independent sources; stopping this lease never cancels wireless.
+constexpr uint32_t HORN_COMMAND_ID = 0x112;
+struct HornControl {
+  uint32_t token=1,lastCommandAt=0;
+  uint16_t sequence=0;
+  bool held=false;
+  void stop(){held=false;sequence=0;if(++token==0)++token;}
+  void tick(uint32_t now){if(held && now-lastCommandAt>=350)stop();}
+  bool accept(const uint8_t *d,uint8_t len,uint32_t now){
+    tick(now);
+    if(len!=8 || d[0]>1 || d[1]!=(d[0]?1:0)){stop();return false;}
+    if(!d[0]){stop();return true;}
+    const uint16_t seq=d[2]|((uint16_t)d[3]<<8);
+    if(steeringRead32(d+4)!=token || !seq || (held && (uint16_t)(seq-sequence)>=0x8000) || (held && seq==sequence))return false;
+    held=true;sequence=seq;lastCommandAt=now;return true;
+  }
+};
+
+struct HornRelay : SteeringRelay {
+  bool accept(uint8_t dir,uint16_t seq,uint32_t lease,uint32_t node,bool ready,uint32_t now){
+    tick(now);
+    if(!ready || !node || lease!=token || dir!=1 || !seq)return false;
+    if(direction && (nodeToken!=node || seq==sequence || (uint16_t)(seq-sequence)>=0x8000))return false;
+    direction=1;sequence=seq;nodeToken=node;lastCommandAt=now;return true;
   }
 };

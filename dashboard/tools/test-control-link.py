@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from gps_test_support import gps_build_flags
 
 root = Path(__file__).resolve().parents[2]
 
@@ -28,7 +29,7 @@ scenarios = r'''
 RemoteDriveGate pedalGate, switchGate;
 SteeringControl steeringNode;
 uint16_t physical=930; // ~0.75 V must permit entry.
-uint8_t physicalSwitches=0;
+uint8_t physicalSwitches=SWITCH_REMOTE_MODE;
 size_t hostDelivered=0,motorDelivered=0;
 void bus() {
   while(hostDelivered<outgoing.size()) {
@@ -66,6 +67,7 @@ void step() {
   if(clockMs%100==0 && switchGate.phase!=1) {
     uint8_t mask=switchGate.phase?driveSwitchMask(physicalSwitches,switchGate.reverse):physicalSwitches;
     pcm::receivePowertrain(0x300,1,&mask);
+    Input switchFrame{};switchFrame.id=0x300;switchFrame.len=1;switchFrame.data[0]=mask;incoming.push_back(switchFrame);readCan();
   }
   pcm::servicePowertrain();
   if(pedalGate.phase && pcm::stopReason==0) assert(pcm::pwm[13]>=62 && pcm::pwm[14]>=62);
@@ -89,16 +91,16 @@ void reverseButton(unsigned seq,bool reverse,uint32_t token) {
 int main() {
   setbuf(stdout,nullptr);pcm::setup();clockMs=10000;advance(1000);
   server.headers["X-SRT-Control"]="1";
-  physical=993;advance(100);button(1);assert(server.code==409 && !drive.held);
-  physical=992;advance(100);
+  physical=1241;advance(100);button(1);assert(server.code==409 && !drive.held);
+  physical=1240;advance(100);
   // Compare the entire output curve, using each browser's real renewal
-  // cadence (button 80 ms, joystick 50 ms), not just the final target value.
+  // cadence (button 2000 ms, joystick 50 ms), not just the final target value.
   auto fullTrace=[&](bool buttons) {
     stopDrive();bus();advance(400);advance((100-clockMs%100)%100);
     std::vector<int> curve;unsigned sequence=0;int previous=62;
-    for(unsigned elapsed=0;elapsed<1600;++elapsed) {
+    for(unsigned elapsed=0;elapsed<pcm::THROTTLE_RAMP_UP_MS+600;++elapsed) {
       if(elapsed==400)physical=4095; // Pedal must be ignored during remote ownership.
-      if(elapsed%(buttons?80:50)==0) {
+      if(elapsed%(buttons?2000:50)==0) {
         if(buttons)button(++sequence,100);else joystick(++sequence,255);
         assert(server.code==200 && drive.held);
       }
@@ -113,20 +115,21 @@ int main() {
   const auto buttonCurve=fullTrace(true),joystickCurve=fullTrace(false);
   assert(buttonCurve==joystickCurve);
   puts("Button 100% and full north have identical complete PWM ramps at their real HTTP cadences; held pedal cannot override or resume after STOP");
+  const unsigned rampRenewals=(pcm::THROTTLE_RAMP_UP_MS+500)/50;
   // Every button level uses the same Node 2 demand conversion as the joystick.
   for(unsigned percent=1;percent<=100;++percent) {
     const size_t before=outgoing.size();button(1,percent);assert(server.code==200);
-    for(unsigned seq=2;seq<=25;++seq) {advance(50);button(seq,percent);assert(drive.held);}
+    for(unsigned seq=2;seq<=rampRenewals;++seq) {advance(50);button(seq,percent);assert(drive.held);}
     const unsigned demand=(percent*255+50)/100,expected=62+193*demand/255;
     assert(pcm::remoteGate.phase==1 && pcm::stopReason==0 && (unsigned)pcm::pwm[13]==expected && pcm::pwm[14]==pcm::pwm[13]);
     for(size_t n=before;n<outgoing.size();++n) assert(outgoing[n].id!=0x301 && outgoing[n].id!=0x300);
     stopDrive();bus();advance(400);
   }
   joystick(1,255);
-  for(unsigned seq=2;seq<=25;++seq) {advance(50);joystick(seq,255);assert(drive.held);}
+  for(unsigned seq=2;seq<=rampRenewals;++seq) {advance(50);joystick(seq,255);assert(drive.held);}
   assert(pcm::pwm[13]==255);stopDrive();bus();advance(400);
   button(1,100);
-  for(unsigned seq=2;seq<=25;++seq) {advance(50);button(seq,100);assert(drive.held);}
+  for(unsigned seq=2;seq<=rampRenewals;++seq) {advance(50);button(seq,100);assert(drive.held);}
   assert(pcm::pwm[13]==255);
   puts("All 100 button levels use the joystick CAN path; button 100% equals full north, PWM255; no injected pedal/switch frames");
   stopDrive();bus();advance(400);
@@ -144,11 +147,11 @@ int main() {
   // throttle-only press must inherit the currently applied manual direction,
   // not silently restore an old direction cached by the preceding GET.
   assert(!drive.session);sendDriveState();assert(!drive.reverse);
-  physicalSwitches=SWITCH_REVERSE;advance(200);assert(pcm::reverseOut);
+  physicalSwitches=SWITCH_REMOTE_MODE|SWITCH_REVERSE;advance(200);assert(pcm::reverseOut);
   button(1,100);
-  for(unsigned seq=2;seq<=25;++seq){advance(50);button(seq,100);assert(drive.held && pcm::reverseOut);}
+  for(unsigned seq=2;seq<=rampRenewals;++seq){advance(50);button(seq,100);assert(drive.held && pcm::reverseOut);}
   assert(pcm::pwm[13]==255);stopDrive();bus();advance(400);
-  physicalSwitches=0;advance(200);sendDriveState();assert(!pcm::reverseOut);
+  physicalSwitches=SWITCH_REMOTE_MODE;advance(200);sendDriveState();assert(!pcm::reverseOut);
   puts("Button throttle inherits the actual manual direction even when the physical reverse switch changes between HTTP polls");
   // Steering belongs to its separate button endpoint; releasing throttle does not stop it.
   steeringRelay=SteeringRelay{};steeringNode=SteeringControl{};
@@ -158,13 +161,18 @@ int main() {
   stopSteeringRelay();bus();advance(400);
   // Reverse while driving: first idle ACK, then direction ACK, then ramp.
   joystick(1,255);
-  for(unsigned seq=2;seq<=25;++seq) {advance(50);joystick(seq,255);}
+  for(unsigned seq=2;seq<=rampRenewals;++seq) {advance(50);joystick(seq,255);}
   assert(!pcm::reverseOut && pcm::pwm[13]==255);
-  joystick(26,255,0,0,true);assert(drive.held && !pcm::reverseOut);
-  for(unsigned seq=27;seq<=59;++seq) {advance(50);joystick(seq,255,0,0,true);assert(drive.held);}
+  joystick(rampRenewals+1,255,0,0,true);assert(drive.held && !pcm::reverseOut);
+  for(unsigned seq=rampRenewals+2;seq<=2*rampRenewals+5;++seq) {advance(50);joystick(seq,255,0,0,true);assert(drive.held);}
   assert(pcm::reverseOut && pcm::pwm[13]==255);
   stopDrive();bus();advance(400);assert(pcm::pwm[13]==62 && pcm::reverseOut);
   puts("Reverse button and joystick pass actual relay switching, idle-before-change, applied direction ACK, delayed completion, rapid toggles and independent steering");
+  physicalSwitches=0;advance(200);sendDriveState();assert(!driveReady() && !driveRemoteModeEnabled());
+  button(1,100);assert(server.code==409 && !drive.held);
+  server.args={{"direction","left"},{"token",String(steeringRelay.token)},{"seq","1"}};
+  handleSteeringCommand();assert(server.code==503 && !steeringRelay.direction);
+  puts("Physical remote-mode OFF blocks button, joystick and steering commands");
 }
 
 '''
@@ -173,5 +181,5 @@ with tempfile.TemporaryDirectory() as directory:
     cpp = path / 'control-link.cpp'
     cpp.write_text(shim + '\nvoid delay(unsigned n){clockMs+=n;}\nnamespace pcm {\nconstexpr int LOW=0,HIGH=1,OUTPUT=1;\n' + motor_io + motor + '\n}\n' + backend + scenarios)
     binary = path / 'control-link'
-    subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-I', str(root / 'node5_dash'), str(cpp), '-o', str(binary)], check=True)
+    subprocess.run(['g++', *gps_build_flags(Path(directory)), '-std=c++17', '-Wall', '-Wextra', '-Werror', '-I', str(root / 'node5_dash'), str(cpp), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

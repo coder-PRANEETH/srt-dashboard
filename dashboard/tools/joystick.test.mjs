@@ -4,7 +4,28 @@ import {setTimeout as wait} from 'node:timers/promises'
 import {joystickCommand,validJoystickCommand} from '../src/joystickModel.js'
 import {createJoystickClient} from '../src/joystickClient.js'
 const reply=data=>({ok:true,json:async()=>data})
-const idle=token=>({ready:true,held:false,token,reverse:false,message:''})
+const idle=token=>({ready:true,held:false,token,reverse:false,remoteMode:true,message:''})
+test('one failed joystick status poll keeps the connection indicator stable',async()=>{
+  let latest,initialized,gets=0
+  const ready=new Promise(resolve=>initialized=resolve),states=[]
+  const client=createJoystickClient(state=>{latest=state;states.push(state);initialized()},async(path,options)=>{
+    if(options.method!=='GET')return reply(idle(1))
+    if(++gets===2)throw new Error('temporary transport error')
+    return reply(idle(1))
+  })
+  try {await ready;await wait(620);assert.ok(gets>=3);assert.equal(latest.ready,true);assert.ok(states.every(state=>state.message!=='CONNECTION LOST'))}
+  finally {client.dispose()}
+})
+test('joystick cannot start when physical remote mode is off',async()=>{
+  let latest,initialized,commands=0
+  const ready=new Promise(resolve=>initialized=resolve)
+  const client=createJoystickClient(state=>{latest=state;initialized()},async(path,options)=>{
+    if(options.method==='GET')return reply({...idle(1),ready:false,remoteMode:false,message:'TURN ON REMOTE MODE SWITCH'})
+    ++commands;return reply(idle(1))
+  })
+  try {await ready;assert.equal(latest.remoteMode,false);assert.equal(client.start(joystickCommand(0,1)),false);assert.equal(commands,0)}
+  finally {client.dispose()}
+})
 test('joystick compass directions, circular diagonals, deadzone and speed limits',()=>{
   for(const [x,y,t,s,d,r] of [[0,1,255,0,0,false],[0,-1,255,0,0,true],[1,0,0,255,2,false],[-1,0,0,255,1,false],[1,1,180,180,2,false],[-1,1,180,180,1,false],[1,-1,180,180,2,true],[-1,-1,180,180,1,true],[0,0,0,0,0,false]]){
     const c=joystickCommand(x,y);assert.equal(c.throttle,t);assert.equal(c.steering,s);assert.equal(c.direction,d);assert.equal(c.reverse,r);assert.ok(validJoystickCommand(c))

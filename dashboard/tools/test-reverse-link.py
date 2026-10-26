@@ -19,6 +19,8 @@ def sketch(name):
 shim = r'''
 #include "node3_ccm/RemoteDrive.h"
 #include "node2_pcm/ThrottleCalibration.h"
+#include "CanRecovery.h"
+#include "TractionMode.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -52,6 +54,7 @@ struct MCP_CAN {
     assert(mode==MCP_ANY && speed==CAN_500KBPS && crystal==MCP_8MHZ);return CAN_OK;
   }
   int setMode(int mode){assert(mode==MCP_NORMAL);return CAN_OK;}
+  int getError(){return 0;} int errorCountTX(){return 0;} int errorCountRX(){return 0;} int abortTX(){return 0;}
   int checkReceive(){return switchRx.empty()?0:CAN_MSGAVAIL;}
   int readMsgBuf(unsigned long *id,byte *len,byte *data){
     auto f=switchRx.front();switchRx.pop_front();*id=f.id;*len=f.len;memcpy(data,f.data,8);return CAN_OK;
@@ -62,6 +65,9 @@ struct MCP_CAN {
 };
 namespace pcm {
 bool canReady=true;
+CanRecovery canRecovery;
+void canService() {}
+void canPrintStatus(const char*) {}
 uint8_t canTxCount=0,canRxCount=0;
 int outputs[40]={},pwm[40]={},pinModes[40]={};
 void pinMode(int pin,int mode){
@@ -141,9 +147,11 @@ int main(){
   expectRelays(true);assert(pcm::pwm[13]==62 && pcm::stopReason==0);
   inputs[33]=HIGH;advance(27);assert(pcm::switchMask==0);expectRelays(false);
   // No other switch combination may change the direction interpretation.
+  bool expectedReverse=false;
   for(uint8_t mask=0;mask<64;++mask){
     selectSwitches(mask);advance(30);assert(pcm::switchMask==mask);
-    expectRelays(mask&0x20);
+    expectedReverse=mask&SWITCH_REVERSE;
+    expectRelays(expectedReverse);
   }
   selectSwitches(0);advance(30);expectRelays(false);
   // The working raw scale has nonzero PWM even at a released 0.7 V pedal.
@@ -160,15 +168,15 @@ int main(){
   // readings above the current idle threshold cannot satisfy the interlock.
   physicalAdc=0;advance(500);pedalOnline=false;advance(501);
   selectSwitches(0x20);advance(2130);expectRelays(false);assert(pcm::stopReason==3);
-  pedalOnline=true;physicalAdc=993;advance(2130);expectRelays(false);assert(pcm::stopReason==6);
+  pedalOnline=true;physicalAdc=1241;advance(2130);expectRelays(false);assert(pcm::stopReason==6);
   physicalAdc=0;advance(2130);expectRelays(true);
-  puts("Reverse blocks reproduced: missing/stale pedal (reason 3), released reading above ADC 992 (reason 6); valid idle recovers");
+  puts("Reverse blocks reproduced: missing/stale pedal (reason 3), released reading above ADC 1240 / 1 V (reason 6); valid idle recovers");
   // Actual Node 3 suppression and actual Node 2 direct ownership must ignore
   // physical direction changes until a safe, ordered return to manual.
-  selectSwitches(0);advance(2130);expectRelays(false);
+  selectSwitches(SWITCH_REMOTE_MODE);advance(2130);expectRelays(false);
   remoteRenew=true;advance(250);assert(ccm::driveGate.phase==1 && pcm::remoteGate.phase==1);
-  const auto before=switchTx.size();selectSwitches(0x20);advance(1200);expectRelays(false);
-  assert(ccm::buildPayload()==0x20 && pcm::remoteGate.phase==1);
+  const auto before=switchTx.size();selectSwitches(SWITCH_REMOTE_MODE|SWITCH_REVERSE);advance(1200);expectRelays(false);
+  assert(ccm::buildPayload()==(SWITCH_REMOTE_MODE|SWITCH_REVERSE) && pcm::remoteGate.phase==1);
   for(size_t n=before;n<switchTx.size();++n)assert(switchTx[n].id!=0x300);
   remoteRenew=false;advance(350);assert(ccm::driveGate.phase==2 && pcm::remoteGate.phase==2);
   expectRelays(false);gate(2);advance(110);assert(ccm::driveGate.phase==2); // switch mismatch

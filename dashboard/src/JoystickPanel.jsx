@@ -1,10 +1,12 @@
+import HornButton from './HornButton.jsx'
+import MobilityButton from './MobilityButton.jsx'
 import { useEffect, useRef, useState } from 'react'
 import { createJoystickClient } from './joystickClient.js'
 import { joystickCommand } from './joystickModel.js'
 import { display } from './diagnostics.js'
 
-export default function JoystickPanel({onClose,onButtons}) {
-  const client=useRef(null),pointer=useRef(null),keys=useRef(new Set()),reverse=useRef(false)
+export default function JoystickPanel({onClose,onButtons,mobility,onToggleMobility}) {
+  const horn=useRef(null),client=useRef(null),pointer=useRef(null),keys=useRef(new Set()),reverse=useRef(false)
   const [state,setState]=useState({ready:false,held:false,message:'CONNECTING'})
   const [point,setPoint]=useState(()=>joystickCommand(0,0)),[limits,setLimits]=useState({throttle:255,steering:255})
   const stop=()=>{pointer.current=null;keys.current.clear();setPoint(joystickCommand(0,0));client.current?.stop()}
@@ -20,6 +22,8 @@ export default function JoystickPanel({onClose,onButtons}) {
     document.addEventListener('visibilitychange',hidden);document.addEventListener('keydown',escape)
     return ()=>{control.dispose();client.current=null;window.removeEventListener('blur',halt);window.removeEventListener('pagehide',halt);window.removeEventListener('offline',halt);document.removeEventListener('visibilitychange',hidden);document.removeEventListener('keydown',escape)}
   },[onClose])
+  useEffect(()=>{if(state.remoteMode===false)client.current?.stop()},[state.remoteMode])
+  useEffect(()=>{client.current?.setMobile(mobility.mobile===true&&!mobility.pending)},[mobility.mobile,mobility.pending])
   const command=(x,y)=>{
     const next=joystickCommand(x,y,limits.throttle,limits.steering)
     if(next.throttle)reverse.current=next.reverse
@@ -52,12 +56,13 @@ export default function JoystickPanel({onClose,onButtons}) {
     if(client.current?.update(next))setPoint(next)
   }
   const selectedReverse=state.held?point.reverse:state.reverse
+  const throttle=mobility.mobile===true&&!mobility.pending&&!state.throttleBlocked?point.throttle:0
   return <div className="control-page joystick-page">
-    <header className="topbar"><span className="wordmark">SRT</span><a className="button" href="/" onClick={stop}>DASHBOARD ↗</a></header>
+    <header className="topbar"><span className="wordmark">SRT</span><a className="button" href="/" onClick={()=>{stop();horn.current?.stop()}}>DASHBOARD ↗</a></header>
     <main className="joystick-console" aria-label="Remote control">
-      <div className="joystick-heading"><div><span className="caps muted">REMOTE CONTROL</span><h1>Drive by feel.</h1></div><button className="button" onClick={()=>{stop();onButtons()}}>BUTTONS ↗</button></div>
+      {state.remoteMode===true?<><div className="joystick-heading"><div><span className="caps muted">REMOTE CONTROL</span><h1>Drive by feel.</h1></div><button className="button" onClick={()=>{stop();onButtons()}}>BUTTONS ↗</button></div>
       <div className="joystick-layout"><section className="joystick-station" aria-label="Joystick controls">
-        <div className="joystick-direction caps"><span>{state.held?(point.throttle?(point.reverse?'REVERSE':'FORWARD'):'STEERING'):'HOLD & DRAG'}</span><span className="muted">MAX 5 s</span></div>
+        <div className="joystick-direction caps"><span>{state.held?(point.throttle?(point.reverse?'REVERSE':'FORWARD'):'STEERING'):'HOLD & DRAG'}</span><span className="muted">RELEASE TO STOP</span></div>
         <div className={`joystick-pad ${state.held?'held':''} ${state.ready?'ready':''}`} role="application" tabIndex={0} aria-label="Drive joystick" aria-describedby="joystick-instructions" aria-disabled={!state.ready&&!state.held}
           onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onLostPointerCapture={up} onContextMenu={event=>event.preventDefault()}
           onKeyDown={keyboard} onKeyUp={keyup} onBlur={()=>{if(keys.current.size)stop()}}
@@ -66,15 +71,16 @@ export default function JoystickPanel({onClose,onButtons}) {
           <span className="compass north">N<span>FORWARD</span></span><span className="compass south">S<span>REVERSE</span></span><span className="compass east">E</span><span className="compass west">W</span>
           <div className="joystick-travel"><span className="joystick-thumb"><i/></span></div>
         </div>
+        <HornButton ref={horn}/>
         <p id="joystick-instructions">Drag in any direction. Farther means faster.<br/>Release to stop · Arrow keys work too.</p>
       </section><section className="joystick-telemetry" aria-label="Joystick command values">
-        <div className="joystick-signal"><span className="caps">THROTTLE COMMAND</span><div><strong data-testid="throttle-command">{point.throttle}</strong><span>/ 255</span></div><meter min="0" max="255" value={point.throttle}/><small>APPLIED PWM <b>{state.appliedThrottlePwm??'—'}</b> · {selectedReverse?'REVERSE':'FORWARD'}</small></div>
+        <div className="joystick-signal"><span className="caps">THROTTLE COMMAND</span><div><strong data-testid="throttle-command">{throttle}</strong><span>/ 255</span></div><meter min="0" max="255" value={throttle}/><small>APPLIED PWM <b>{state.appliedThrottlePwm??'—'}</b> · {selectedReverse?'REVERSE':'FORWARD'}</small></div>
         <div className="joystick-signal"><span className="caps">STEERING COMMAND</span><div><strong data-testid="steering-command">{point.steering}</strong><span>/ 255</span></div><meter min="0" max="255" value={point.steering}/><small>{['STOP','LEFT','RIGHT'][point.direction]} · APPLIED PWM <b>{state.steeringPwm??'—'}</b> · ANGLE <b>{display(state.angleDeg,1,'°')}</b></small></div>
         <div className="joystick-limits"><div><label htmlFor="throttle-limit">THROTTLE LIMIT</label><b>{limits.throttle}</b><input id="throttle-limit" type="range" min="0" max="255" value={limits.throttle} disabled={state.held} onChange={e=>setLimits({...limits,throttle:Number(e.target.value)})}/></div><div><label htmlFor="steering-limit">STEERING LIMIT</label><b>{limits.steering}</b><input id="steering-limit" type="range" min="0" max="255" value={limits.steering} disabled={state.held} onChange={e=>setLimits({...limits,steering:Number(e.target.value)})}/></div></div>
       </section></div>
       <div className={`joystick-status ${state.held?'active':''}`} role="status"><i/>{state.message || (state.ready?'READY · PHYSICAL PEDAL BLOCKED WHILE HELD':'CONNECTING')}</div>
-      <button className="button joystick-stop" onPointerDown={stop} onClick={e=>{if(e.detail===0)stop()}}>STOP</button>
-      <p className="joystick-footnote">Left/right controls steering motor speed. Releasing stops the motor; it does not center the wheels. Zero throttle keeps the 0.8 V idle signal. Direction changes wait for idle throttle and relay settling.</p>
+      <p className="joystick-footnote">Left/right controls steering motor speed. Releasing stops the motor; it does not center the wheels. Zero throttle keeps the 0.8 V idle signal. Direction changes wait for idle throttle and relay settling.</p></>:<section className="remote-mode-gate" role="status"><span className="caps">{state.remoteMode===false?'REMOTE MODE OFF':'WAITING FOR SWITCH STATUS'}</span><h1>Turn on the physical REMOTE MODE switch</h1><p>Mobile steering, throttle and horn are disabled until Node 3 reports remote mode on.</p></section>}
+      <MobilityButton state={mobility} onToggle={onToggleMobility} className="joystick-mobility"/>
     </main>
   </div>
 }

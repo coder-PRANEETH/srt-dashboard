@@ -11,11 +11,13 @@
 #include "SteeringControl.h"
 #include "SteeringFeedback.h"
 #include "RemoteDrive.h"
+#include "CanRecovery.h"
 #include <esp_system.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_arduino_version.h>
+#include <driver/gpio.h>
 
 // Match the steering-wheel transmitter's current WiFi channel. No TCP/UDP
 // port, access point connection or send peer is needed for ESP-NOW reception.
@@ -52,12 +54,24 @@ void setupSteeringReceiver() {
     esp_now_deinit(); Serial.println("ERROR: steering receive callback failed"); return;
   }
   steeringRadioReady = true;
-  Serial.printf("Steering ESP-NOW listening on channel %u | angle + sequence (8 bytes), optional horn (9 bytes) | range +/-%d deg\n", STEERING_WIFI_CHANNEL, STEERING_MAX_ANGLE_DEG);
+  Serial.printf("Steering ESP-NOW listening on channel %u | angle + sequence (8 bytes), horn (9 bytes), horn + angle validity (10 bytes), wheel pitch (14 bytes) | range +/-%d deg\n", STEERING_WIFI_CHANNEL, STEERING_MAX_ANGLE_DEG);
 }
 
 #define ACCELERATOR_PIN 34
 #define MOTOR_LPWM 32
 #define MOTOR_RPWM 33
+constexpr uint8_t HORN_RELAY_PIN = 13;
+#ifndef NODE1_HORN_ACTIVE_LOW
+#define NODE1_HORN_ACTIVE_LOW 0
+#endif
+constexpr uint8_t HORN_RELAY_ON = NODE1_HORN_ACTIVE_LOW ? LOW : HIGH;
+constexpr uint8_t HORN_RELAY_OFF = NODE1_HORN_ACTIVE_LOW ? HIGH : LOW;
+HornControl websiteHorn;
+bool hornRelayOn=false;
+uint32_t lastHornStatus=0;
+uint8_t lastHornFlags=255;
+uint32_t lastHornToken=0;
+void serviceHornRelay();
 const int MOTOR_SPEED = 60; // User-tested 8-bit analogWrite duty, not percent.
 static_assert(MOTOR_SPEED == STEERING_PWM, "Steering protocol PWM must match motor configuration");
 SteeringControl steering;
@@ -130,6 +144,8 @@ void serviceSteering() {
   portENTER_CRITICAL(&steeringFeedbackMux);
   steeringFeedback = wirelessSteeringFeedback;
   portEXIT_CRITICAL(&steeringFeedbackMux);
+  // Act on the fresh wireless snapshot before CAN or console work.
+  serviceHornRelay();
   // A local motor check is independent of the wireless angle sensor. Existing
   // CAN-send fault handlers still stop it, and its run time is bounded here.
   if (serialSteeringActive) {
@@ -144,6 +160,12 @@ void serviceSteering() {
   if (steering.tick(millis())) steeringStatusPending = true;
   applySteering();
 }
+void applyHornRelay(uint32_t now) {
+  websiteHorn.tick(now);
+  hornRelayOn=steeringFeedback.hornActive(now) || websiteHorn.held;
+  digitalWrite(HORN_RELAY_PIN,hornRelayOn?HORN_RELAY_ON:HORN_RELAY_OFF);
+}
+void serviceHornRelay() { applyHornRelay(millis()); }
 
 #define CAN_SCK  18
 #define CAN_MISO 19
@@ -162,6 +184,8 @@ MCP_CAN CAN(CAN_CS);
 unsigned long lastSend = 0;
 unsigned long lastPrint = 0;
 bool canReady = false;
+CanRecovery canRecovery;
+bool canFaultHandled=false;
 unsigned long txOK = 0, txFailed = 0, lastTxAt = 0;
 
 RemoteDriveGate driveGate;
@@ -178,11 +202,25 @@ void initializeCAN() {
   canReady = CAN.begin(MCP_ANY, CAN_SPEED, CAN_CRYSTAL) == CAN_OK &&
              CAN.setMode(MCP_NORMAL) == CAN_OK;
   if (canReady) {
+    canRecovery.started(millis()); canFaultHandled=false;
     steeringStatusPending = true;
     Serial.println("CAN initialized | remote steering RX=0x110 TX=0x111 | angle optional");
   } else {
     Serial.println("ERROR: CAN initialization failed; retrying in 1 s. Serial steering is local only.");
   }
+}
+void serviceCanHealth() {
+  canRecovery.poll(CAN,canReady,millis(),canReady && CAN.checkReceive()==CAN_MSGAVAIL);
+  if(!canReady && !canFaultHandled) {
+    canFaultHandled=true; driveGate.lock(); websiteHorn.stop();
+    stopSerialSteering(1); serviceHornRelay();
+    Serial.printf("CAN recovery: %s EFLG=0x%02X TEC=%u REC=%u | faults=%lu resets=%lu; retry in 1 s\n",
+      canRecovery.message(),canRecovery.errorFlags,canRecovery.txErrors,canRecovery.rxErrors,
+      (unsigned long)canRecovery.faults,(unsigned long)canRecovery.restarts);
+  }
+}
+bool sendCanFrame(uint32_t id, uint8_t len, uint8_t *data) {
+  return canRecovery.send(CAN,canReady,id,len,data,millis());
 }
 
 void receiveSteering() {
@@ -190,6 +228,7 @@ void receiveSteering() {
   for (uint8_t n=0; n<4 && canReady && CAN.checkReceive() == CAN_MSGAVAIL; ++n) {
     unsigned long id = 0; byte len = 0, data[8] = {};
     if (CAN.readMsgBuf(&id, &len, data) != CAN_OK) break;
+    canRecovery.received(millis());
     if(id==DRIVE_SWITCH_STATUS_ID && len==8 && driveStatusValid(data,SWITCH_VALID_MASK)) {
       drivePeerNormal=(data[0]&0x7F)==0; drivePeerSession=driveRead32(data+4);
       drivePeerAt=millis(); drivePeerSeen=true;
@@ -198,6 +237,7 @@ void receiveSteering() {
       driveGate.accept(data,len,1,acceleratorADC<=DRIVE_IDLE_ADC,
         drivePeerSeen && drivePeerNormal && drivePeerSession==driveGate.session && millis()-drivePeerAt<350,millis());
     }
+    if(id==HORN_COMMAND_ID){websiteHorn.accept(data,len,millis());serviceHornRelay();}
     if (id == STEERING_COMMAND_ID) {
       ++remoteSteeringReceived;
       serviceSteering();
@@ -219,7 +259,7 @@ void receiveSteering() {
 void sendDriveGateStatus() {
   if(!canReady || millis()-driveStatusAt<100) return;
   byte data[8]; driveGate.status(data,acceleratorADC); driveStatusAt=millis();
-  if(CAN.sendMsgBuf(DRIVE_PEDAL_STATUS_ID,0,8,data)==CAN_OK) { ++txOK; lastTxAt=millis(); }
+  if(sendCanFrame(DRIVE_PEDAL_STATUS_ID,8,data)) { ++txOK; lastTxAt=millis(); }
   else {
     ++txFailed; driveGate.lock();
     if (steering.direction) { steering.stop(1); applySteering(); }
@@ -229,7 +269,7 @@ void sendSteeringStatus() {
   if (!canReady || (!steeringStatusPending && millis()-lastSteeringStatus < 100)) return;
   byte data[8]; steering.status(data);
   lastSteeringStatus = millis();
-  lastSteeringStatusOK = CAN.sendMsgBuf(STEERING_STATUS_ID, 0, 8, data) == CAN_OK;
+  lastSteeringStatusOK = sendCanFrame(STEERING_STATUS_ID,8,data);
   if (lastSteeringStatusOK) {
     steeringStatusPending = false; ++txOK; lastTxAt=millis();
   } else {
@@ -243,20 +283,45 @@ void sendSteeringAngle() {
   const bool live = steeringFeedback.fresh(now);
   if (!canReady || (live == steeringAngleWasFresh && now-lastSteeringAngleStatus < 50)) return;
   byte data[8]; steeringFeedback.status(data, now);
+  byte pitch[8]; steeringFeedback.pitchStatus(pitch, now);
   lastSteeringAngleStatus = now; steeringAngleWasFresh = live;
-  if (CAN.sendMsgBuf(STEERING_ANGLE_ID, 0, 8, data) == CAN_OK) { ++txOK; lastTxAt=millis(); }
+  const bool angleOK=sendCanFrame(STEERING_ANGLE_ID,8,data);
+  if(angleOK) { ++txOK;lastTxAt=millis(); }
+  else { ++txFailed;if(steering.direction){steering.stop(1);applySteering();} }
+  if (sendCanFrame(WHEEL_PITCH_ID,8,pitch)) { ++txOK; lastTxAt=millis(); }
   else {
     ++txFailed;
     if (steering.direction) { steering.stop(1); applySteering(); }
   }
 }
+void sendHornStatus() {
+  if(!canReady)return;
+  const uint32_t now=millis();
+  applyHornRelay(now);
+  byte data[8];steeringFeedback.hornStatus(data,now);
+  data[0]=hornRelayOn?1:0;data[1]|=websiteHorn.held?4:0;
+  steeringWrite32(data+4,websiteHorn.token);
+  if(now-lastHornStatus<100 && data[1]==lastHornFlags && websiteHorn.token==lastHornToken)return;
+  lastHornStatus=now;
+  if(sendCanFrame(WIRELESS_HORN_STATUS_ID,8,data)){
+    ++txOK;lastTxAt=now;lastHornFlags=data[1];lastHornToken=websiteHorn.token;
+  }else ++txFailed;
+}
 
 void setup() {
+  // Preload OFF before enabling output (digitalWrite before pinMode is ignored
+  // by ESP32 core 3.x). This also supports active-LOW relay modules.
+  gpio_set_level((gpio_num_t)HORN_RELAY_PIN,HORN_RELAY_OFF);
+  pinMode(HORN_RELAY_PIN, OUTPUT);
+  digitalWrite(HORN_RELAY_PIN,HORN_RELAY_OFF);
   pinMode(MOTOR_LPWM, OUTPUT); pinMode(MOTOR_RPWM, OUTPUT);
   stopMotor();
   steering.token = esp_random(); if (!steering.token) steering.token = 1;
   applySteering();
   Serial.begin(115200);
+  websiteHorn.token=esp_random();if(!websiteHorn.token)websiteHorn.token=1;
+  Serial.printf("Horn relay: GPIO13/D13 | ON=%s OFF=%s | wireless 250 ms / website 350 ms leases\n",
+                HORN_RELAY_ON==HIGH?"HIGH":"LOW",HORN_RELAY_OFF==HIGH?"HIGH":"LOW");
   Serial.println("Steering serial test: a=LEFT d=RIGHT +=PWM+10 -=PWM-10 s/space=STOP; PWM 0..255, starts at 60, 5 s per a/d. Angle feedback not required for local test.");
   setupSteeringReceiver();
   Serial.println("Serial 115200 | CAN 500 kbps / MCP2515 8 MHz | SPI SCK=18 MISO=19 MOSI=23 CS=25");
@@ -272,7 +337,9 @@ void setup() {
 }
 
 void loop() {
-  if (!canReady && millis()-lastCanAttempt >= 1000) initializeCAN();
+  serviceSteering();
+  serviceCanHealth();
+  if (!canReady && canRecovery.retryDue(millis(),lastCanAttempt)) initializeCAN();
   acceleratorADC = analogRead(ACCELERATOR_PIN);
   driveGate.tick(millis());
   serviceSteering(); receiveSteering(); serviceSteering();
@@ -288,7 +355,7 @@ void loop() {
     data[1] = (transmittedADC >> 8) & 0xFF;
 
     lastSendOK =
-      (CAN.sendMsgBuf(ACCEL_CAN_ID, 0, 2, data) == CAN_OK);
+      sendCanFrame(ACCEL_CAN_ID,2,data);
     if (lastSendOK) { ++txOK; lastTxAt = millis(); }
     else { ++txFailed; if (steering.direction) { steering.stop(1); applySteering(); } }
     if (lastSendOK && now-lastPrint>=PRINT_INTERVAL_MS) Serial.printf("[%lu ms] CAN TX ID=0x301 DLC=2 | accelerator ADC=%d/4095 | raw pin voltage estimate=%.3f V\n",
@@ -306,7 +373,7 @@ void loop() {
     if (steeringFeedback.fresh(now)) Serial.printf("Steering=%.2f deg seq=%lu age=%lu ms | ", steeringFeedback.angle, (unsigned long)steeringFeedback.sequence, (unsigned long)(now-steeringFeedback.receivedAt));
     else Serial.printf("Steering angle UNAVAILABLE (%s) | ", steeringRadioReady ? "waiting/stale" : "radio failed");
     Serial.printf("IMU accepted=%lu invalid=%lu replayed=%lu | ", (unsigned long)steeringFeedback.accepted, (unsigned long)steeringFeedback.invalid, (unsigned long)steeringFeedback.replayed);
-    Serial.printf("IMU horn=%s | ", steeringFeedback.fresh(now) && steeringFeedback.hornAvailable ?
+    Serial.printf("Horn D13=%s | IMU horn=%s | ",hornRelayOn?"ON":"OFF", steeringFeedback.packetFresh(now) && steeringFeedback.hornAvailable ?
       (steeringFeedback.hornPressed ? "PRESSED" : "RELEASED") : "UNAVAILABLE");
     float voltage = throttleRawVoltage(acceleratorADC);
 
@@ -327,5 +394,8 @@ void loop() {
   driveGate.tick(millis());
   sendDriveGateStatus();
   serviceSteering(); sendSteeringAngle(); serviceSteering(); sendSteeringStatus(); serviceSteering();
+  serviceHornRelay();
+  sendHornStatus();
+  serviceCanHealth();
   delay(1);
 }

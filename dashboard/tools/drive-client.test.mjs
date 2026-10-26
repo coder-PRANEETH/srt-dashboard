@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { setTimeout as wait } from 'node:timers/promises'
 import { createDriveClient } from '../src/driveClient.js'
 const reply=data=>({ok:true,json:async()=>data})
-const idle=token=>({ready:true,token,held:false,adc:0,reverse:false,canShift:true,message:''})
+const idle=token=>({ready:true,remoteMode:true,token,held:false,adc:0,reverse:false,canShift:true,message:''})
 test('healthy 300 ms status replies keep reverse available instead of alternating connection loss',async()=>{
   let latest,settled,gets=0
   const states=[],initialized=new Promise(resolve=>settled=resolve)
@@ -20,6 +20,45 @@ test('healthy 300 ms status replies keep reverse available instead of alternatin
     await initialized;assert.equal(latest.ready,true);assert.equal(latest.canShift,true)
     await wait(600);assert.ok(gets>=2);assert.ok(states.every(s=>s.ready && s.message!=='CONNECTION LOST'))
   } finally {client.dispose()}
+})
+test('one failed idle status poll does not flicker the connection state',async()=>{
+  let latest,settled,gets=0
+  const initialized=new Promise(resolve=>settled=resolve)
+  const client=createDriveClient(state=>{latest=state;settled()},async(path,options)=>{
+    if(options.method!=='GET')return reply(idle(1))
+    if(++gets===2)throw new Error('temporary transport error')
+    return reply(idle(1))
+  })
+  try {
+    await initialized;await wait(620)
+    assert.ok(gets>=3);assert.equal(latest.ready,true);assert.notEqual(latest.message,'CONNECTION LOST')
+  } finally {client.dispose()}
+})
+test('button throttle and reverse stay disabled when physical remote mode is off',async()=>{
+  let latest,initialized,commands=0
+  const ready=new Promise(resolve=>initialized=resolve)
+  const client=createDriveClient(state=>{latest=state;initialized()},async(path,options)=>{
+    if(options.method==='GET')return reply({...idle(1),ready:false,remoteMode:false,message:'TURN ON REMOTE MODE SWITCH'})
+    ++commands;return reply(idle(1))
+  })
+  try {await ready;assert.equal(latest.remoteMode,false);assert.equal(client.start(25),false);assert.equal(await client.reverse(),false);assert.equal(commands,0)}
+  finally {client.dispose()}
+})
+test('continuous throttle renews every two seconds and remains active beyond five seconds',async()=>{
+  let latest,settled,moves=0
+  const sentAt=[]
+  const initialized=new Promise(resolve=>settled=resolve)
+  const client=createDriveClient(state=>{latest=state;settled()},async(path,options)=>{
+    if(options.method==='GET')return reply(idle(1))
+    const p=new URLSearchParams(options.body)
+    if(p.get('action')==='stop')return reply(idle(1))
+    ++moves;sentAt.push(Date.now());return reply({...idle(1),held:true,adc:1200,canShift:false})
+  })
+  try {
+    await initialized;assert.equal(client.start(40),true);await wait(5200)
+    assert.equal(latest.held,true);assert.equal(moves,3)
+    assert.ok(sentAt.slice(1).every((at,i)=>at-sentAt[i]>=1900 && at-sentAt[i]<2400))
+  } finally {await client.stop();client.dispose()}
 })
 test('zero level cannot move; late throttle response cannot resume a released hold',async()=>{
   let token=8,complete,latest,ready,moves=0

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import MapView from './MapView'
+import ModeStatus from './ModeStatus'
 import { advanceTrack, useNow, useTelemetry, validFix } from './useTelemetry'
 import { display, freshFeed, number, STEERING_MAX_ANGLE_DEG } from './diagnostics'
 
@@ -46,14 +47,14 @@ export default function HomePage() {
   return <>
     <div className="cockpit" inert={mapOpen || intro}>
       <header className="topbar"><span className="wordmark">SRT</span><div className="top-actions"><span className={`pill ${fix ? '' : 'attention'}`}><i className="dot" />{fix ? 'GPS FIX' : 'NO FIX'}</span><time className="mono">{new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}</time></div></header>
-      <main className="drive"><div className="instruments">
+      <main className="drive"><ModeStatus vehicle={vehicle} now={now}/><div className="instruments">
         <section aria-label="GPS speed"><div className="section-label caps">GPS speed</div><div className="speed-value"><span className="ghost">{leading}</span>{digits.slice(leading.length)}</div><div className="speed-unit">KM / H</div><div className="speed-rule" style={{ '--speed': `${(speed || 0) / 1.6}%` }} /><div className="speed-ticks mono">{[0, 40, 80, 120, 160].map(n => <span key={n}>{n}</span>)}</div></section>
-        <section aria-label="Steering angle" className="wheel-module"><div className="wheel-caption caps">STEERING ANGLE</div><Wheel angle={memory.angle} available={steeringAvailable} /><div className="wheel-reading"><strong className="mono">{steeringAvailable ? `${vehicle.steeringDeg > 0 ? '+' : ''}${vehicle.steeringDeg.toFixed(1)}°` : '—'}</strong></div>{!steeringAvailable && <span className="sensor-state">UNAVAILABLE</span>}</section>
+        <section aria-label="Steering angle" className="wheel-module"><div className="wheel-caption caps">STEERING ANGLE</div><Wheel angle={memory.angle} available={steeringAvailable} /><div className="wheel-reading"><strong className="mono">{steeringAvailable ? `${vehicle.steeringDeg > 0 ? '+' : ''}${vehicle.steeringDeg.toFixed(1)}°` : '—'}</strong></div>{!steeringAvailable && <span className="sensor-state">UNAVAILABLE</span>}<p className="wheel-pitch">Wheel pitch {vehicle?.wheelPitchValid && now-(feeds.vehicle?.at||0)<1000 ? display(vehicle.wheelPitchDeg,1,'°') : '—'} · display only</p></section>
         <section aria-label="Accelerator input" className="accelerator"><div className="section-label caps">Accelerator</div><div className="accel-reading mono">{display(accelerator)}<small>%</small></div><div className="pedal-bars" aria-hidden="true">{Array.from({ length: 10 }, (_, n) => <i key={n} className={`pedal-bar ${number(accelerator) && accelerator > n * 10 ? 'on' : ''}`} style={{ height: `${25 + n * 7.5}%` }} />)}</div></section>
       </div><div className="bottom-rail">
         <div><div className="caps muted">TRIP</div><div className="rail-value mono">{track.trip.toFixed(2)}<small>km</small></div></div>
         <div><div className="caps muted">Heading</div><div className="rail-value mono">{fix ? display(track.heading) : '—'}<small>°</small></div></div>
-        <div><div className="caps muted">SATELLITES</div><div className="rail-value mono">{fix ? display(gps.sats) : '—'}</div></div>
+        <div><div className="caps muted">SATELLITES</div><div className="rail-value mono">{display(gps?.sats)}</div></div>
         <div className="drive-actions"><button className="button primary" onClick={() => setMapOpen(true)}><svg className="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2V5ZM9 3v16M15 5v16" /></svg>MAP ↗</button></div>
       </div></main>
     </div>

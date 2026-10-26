@@ -1,7 +1,9 @@
 /*
 Node 5 DASH / WiFi host - PRODUCTION. Serial Monitor: 115200 baud.
 Connections:
-  MCP2515 wiring listed below links this host to the five-node CAN bus.
+  MCP2515 wiring listed below links Nodes 1, 2, 3 and 5 over CAN.
+  GPS TX -> GPIO16 (RX2); GPS RX -> GPIO17 (TX2, optional), 9600 baud.
+  GPS UART logic must be 3.3 V compatible; power per module specification.
   No local speed sensor/potentiometer is connected. WiFi serves the site.
   Use classic ESP32 Dev Module with No OTA (2 MB APP / 2 MB SPIFFS).
   Upload this sketch AND compressed data/ as LittleFS; packing
@@ -13,9 +15,9 @@ Verification:
   Node 1/3 activity should appear from 0x301/0x300 without heartbeats.
   /api/vehicle shows little-endian pedal ADC, ADC-scale percent and an
   estimated GPIO voltage. Node 2 reports motor output on 0x201 and
-  health on 0x600; older receive-only firmware remains unknown.
-  /api/gps shows a fix only after valid 0x400; /api/data speed needs two
-  successive usable GPS fixes. Change the initial AP password in code.
+  health on 0x602; older receive-only firmware remains unknown.
+  /api/gps reads the local GPS UART; /api/data uses GPS-reported speed.
+  GPS reception works even when CAN is unavailable. Change the initial AP password in code.
 
 Shared CAN connection (classic ESP32 + MCP2515):
   GPIO18 -> SCK, GPIO19 <- SO/MISO, GPIO23 -> SI/MOSI,
@@ -34,18 +36,26 @@ Shared CAN connection (classic ESP32 + MCP2515):
 #include "SteeringControl.h"
 #include "SteeringFeedback.h"
 #include "RemoteDrive.h"
+#include "TractionMode.h"
 #include <esp_system.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
 #include <math.h>
+#include <TinyGPSPlus.h>
 
 // Upload this sketch AND data/ with LittleFS (No OTA partition).
 const char *AP_SSID = "srt-dash";
 const char *AP_PASS = "12345678"; // Change before deployment.
 WebServer server(80);
 struct Sample { uint8_t bytes[8] = {}; uint8_t len = 0; uint32_t at = 0, received = 0, invalid = 0; bool seen = false; };
+int8_t requestedMobility=-1;
+uint32_t mobilitySentAt=0,mobilityEnableToken=0,mobilityBlockedSession=0;
+void serviceMobility();
 SteeringRelay steeringRelay;
+HornRelay hornRelay;
+uint32_t hornStopToken=0,hornStopAt=0;
+bool hornStopPending=false;
 struct DriveHost {
   uint32_t token=1, session=0, lastHttp=0, started=0, lastTx=0, settledAt=0, stoppedAt=0;
   uint16_t httpSeq=0, gateSeq=0, pwmSeq=0, adc=0;
@@ -61,15 +71,65 @@ bool joystickSteerStopping=false;
 uint32_t joystickStoppedNodeToken=0;
 void serviceDrive();
 void stopDrive(const char *reason);
-const uint16_t ids[] = {0x121,0x122,0x124,0x111,0x100,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x400,0x401,0x500,0x501};
+bool driveRemoteModeKnown();
+bool driveRemoteModeEnabled();
+bool driveHillSelected();
+bool sendDrivePWM(uint8_t pwm);
+const uint16_t ids[] = {0x121,0x122,0x124,TRACTION_MODE_STATUS_ID,0x111,0x100,WHEEL_PITCH_ID,WIRELESS_HORN_STATUS_ID,0x101,0x151,0x200,0x201,0x300,0x301,0x302,0x501};
 Sample samples[sizeof(ids)/sizeof(ids[0])];
 struct NodeState { uint8_t status = 0, error = 0, tx = 0, rx = 0; uint32_t at = 0; bool seen = false; } nodes[6];
 struct LogFrame { uint32_t seq, ms, id; uint8_t len, bytes[8]; bool tx=false; } logFrames[64];
 uint8_t logNext = 0, logCount = 0;
 uint32_t frameCount = 0, lastBeat = 0, malformedFrames = 0, unknownFrames = 0, lastCanAttempt = 0;
 bool fsReady = false;
-float gpsSpeedKmh = NAN, prevLat = NAN, prevLon = NAN;
-uint32_t prevGpsAt = 0;
+// Local GPS is independent of CAN. Keep each drain bounded for control leases.
+constexpr int8_t GPS_RX = 16, GPS_TX = 17;
+constexpr uint32_t GPS_BAUD = 9600, GPS_TIMEOUT_MS = 3000;
+constexpr uint16_t GPS_READ_BUDGET = 256;
+HardwareSerial gpsSerial(2);
+TinyGPSPlus gps;
+TinyGPSCustom gpsGpQuality(gps, "GPGGA", 6), gpsGnQuality(gps, "GNGGA", 6);
+TinyGPSCustom gpsGpStatus(gps, "GPRMC", 2), gpsGnStatus(gps, "GNRMC", 2);
+bool gpsCharsSeen = false, gpsFixReported = false;
+uint32_t gpsCharAt = 0;
+void serviceGps() {
+  for (uint16_t n=0; n<GPS_READ_BUDGET && gpsSerial.available(); ++n) {
+    gpsCharsSeen = true; gpsCharAt = millis();
+    if (!gps.encode(gpsSerial.read())) continue;
+    // TinyGPS++ retains the last location on a no-fix sentence. Invalidate it
+    // immediately when a checksum-valid GGA/RMC explicitly reports fix loss.
+    for (auto *quality : {&gpsGpQuality, &gpsGnQuality})
+      if (quality->isUpdated()) { const char c=quality->value()[0]; gpsFixReported=c>='1' && c<='8'; }
+    for (auto *status : {&gpsGpStatus, &gpsGnStatus})
+      if (status->isUpdated()) gpsFixReported=status->value()[0]=='A';
+  }
+}
+bool gpsHasFix() {
+  return gpsFixReported && gps.location.isValid() && gps.location.age()<GPS_TIMEOUT_MS &&
+    isfinite(gps.location.lat()) && fabs(gps.location.lat())<=90 &&
+    isfinite(gps.location.lng()) && fabs(gps.location.lng())<=180;
+}
+bool gpsHasSpeed() {
+  return gpsHasFix() && gps.speed.isValid() && gps.speed.age()<GPS_TIMEOUT_MS &&
+    isfinite(gps.speed.kmph()) && gps.speed.kmph()>=0;
+}
+String gpsJson() {
+  const bool fix=gpsHasFix();
+  String j; j.reserve(500);
+  j="{\"source\":\"local-uart\",\"rxPin\":"+String(GPS_RX)+",\"txPin\":"+String(GPS_TX)+",\"baud\":"+String(GPS_BAUD);
+  j+=",\"fix\":"+String(fix?"true":"false");
+  j+=",\"receiving\":"+String(gpsCharsSeen && millis()-gpsCharAt<GPS_TIMEOUT_MS?"true":"false");
+  j+=",\"ageMs\":"+(gps.location.isValid()?String(gps.location.age()):"null");
+  j+=",\"rxAgeMs\":"+(gpsCharsSeen?String(millis()-gpsCharAt):"null");
+  j+=",\"sats\":"+(gps.satellites.isValid() && gps.satellites.age()<GPS_TIMEOUT_MS?String(gps.satellites.value()):"null");
+  j+=",\"hdop\":"+(gps.hdop.isValid() && gps.hdop.age()<GPS_TIMEOUT_MS?String(gps.hdop.hdop(),2):"null");
+  if(fix) { j+=",\"lat\":"+String(gps.location.lat(),6); j+=",\"lon\":"+String(gps.location.lng(),6); }
+  j+=",\"speed\":"+(gpsHasSpeed()?String(gps.speed.kmph(),1):"null");
+  j+=",\"charsProcessed\":"+String(gps.charsProcessed());
+  j+=",\"passedChecksum\":"+String(gps.passedChecksum())+",\"failedChecksum\":"+String(gps.failedChecksum());
+  j+=",\"sentencesWithFix\":"+String(gps.sentencesWithFix())+"}";
+  return j;
+}
 
 template<size_t N> bool sendLoggedCan(uint32_t id, const uint8_t (&data)[N]) {
   if(!canSend(id,data)) return false;
@@ -85,14 +145,8 @@ Sample *sampleFor(uint32_t id) {
 }
 bool fresh(const Sample *s, uint32_t timeout) { return s && s->seen && millis() - s->at < timeout; }
 uint16_t le16(const uint8_t *b) { return b[0] | ((uint16_t)b[1] << 8); }
-uint16_t be16(const uint8_t *b) { return ((uint16_t)b[0] << 8) | b[1]; }
-float degToRad(float deg) { return deg * 0.01745329252f; }
-float distanceMeters(float a, float b, float c, float d) {
-  float x = degToRad(c - a), y = degToRad(d - b);
-  float h = sinf(x/2)*sinf(x/2) + cosf(degToRad(a))*cosf(degToRad(c))*sinf(y/2)*sinf(y/2);
-  return 12742000.0f * asinf(fminf(1.0f, sqrtf(h)));
-}
 void readCan() {
+  serviceGps();
   uint32_t id; uint8_t len, data[8];
   for (uint8_t n=0; n<16 && canRead(id, len, data); ++n) {
     const uint32_t now = millis();
@@ -100,64 +154,40 @@ void readCan() {
     LogFrame &f = logFrames[logNext];
     f.tx=false; f.seq = frameCount; f.ms = now; f.id = id; f.len = len; memcpy(f.bytes, data, 8);
     logNext = (logNext + 1) % 64; if (logCount < 64) ++logCount;
-    const bool validHeartbeat = len == 8 && data[0] >= 1 && data[0] <= 5 && data[1] <= 1;
-    if (id == 0x600 && validHeartbeat) {
+    const bool heartbeatId=id==0x600 || (id>=0x601 && id<=0x605);
+    const bool validHeartbeat = len == 8 && (data[0] == 1 || data[0] == 2 || data[0] == 3 || data[0] == 5) && data[1] <= 1 &&
+      (id==0x600 || id==0x600UL+data[0]);
+    if (heartbeatId && validHeartbeat) {
       NodeState &n = nodes[data[0]];
       n.seen = true; n.at = now; n.status = data[1]; n.error = data[3]; n.tx = data[4]; n.rx = data[5];
     }
     Sample *s = sampleFor(id);
     const uint8_t expectedLength = id == 0x300 ? 1 : id == 0x301 ? 2 : 8;
-    const bool validGps = id != 0x400 || (data[6] <= 1 && (!data[6] ||
-      (data[0] <= 90 && data[3] <= 180 && be16(data+1) < 6000 && be16(data+4) < 6000 &&
-       (data[0] < 90 || be16(data+1) == 0) && (data[3] < 180 || be16(data+4) == 0))));
-    const bool validPitch = id != 0x500 || (data[0] <= 1 && data[2] <= 100 && data[3] <= 1 && (!data[3] || data[1] <= 180));
     const bool validMotor = id != 0x201 || (data[0]<=1 && data[1]<=1 && data[2]<=1 && data[3]<=100 &&
-      data[4]<=1 && data[5]<=1 && data[6]<=1 && data[7]<=9);
+      data[4]<=1 && data[5]<=1 && data[6]<=1 && data[7]<=11);
     const bool validPayload = len == expectedLength && (id != 0x301 || le16(data) <= 4095) &&
-      (id != 0x300 || !(data[0]&~SWITCH_VALID_MASK)) && (id != 0x401 || data[0]<=1) && validGps && validPitch && validMotor &&
+      (id != 0x300 || !(data[0]&~SWITCH_VALID_MASK)) && validMotor &&
       (id != STEERING_ANGLE_ID || steeringAngleFrameValid(data)) &&
+      (id != WHEEL_PITCH_ID || wheelPitchFrameValid(data)) &&
+      (id != WIRELESS_HORN_STATUS_ID || wirelessHornFrameValid(data)) &&
+      (id != TRACTION_MODE_STATUS_ID || tractionModeFrameValid(data)) &&
       ((id != 0x121 && id != 0x122 && id != 0x124) || driveStatusValid(data,id==0x121 ? 4095 : id==0x122 ? SWITCH_VALID_MASK : 255)) &&
       (id != STEERING_STATUS_ID || steeringOutputValid(data));
     if (s) { ++s->received; if (!validPayload) { ++s->invalid; ++malformedFrames; } }
-    else if (id == 0x600) { if (!validHeartbeat) ++malformedFrames; }
+    else if (heartbeatId) { if (!validHeartbeat) ++malformedFrames; }
     else ++unknownFrames;
     if (s && validPayload) {
       memcpy(s->bytes, data, 8); s->len = len; s->at = now; s->seen = true;
-      if (id == 0x400) {
-        if (data[6] && data[0] <= 90 && data[3] <= 180 && be16(data+1) < 6000 && be16(data+4) < 6000) {
-          float lat = data[0] + be16(data+1)/6000.0f;
-          float lon = data[3] + be16(data+4)/6000.0f;
-          if (isfinite(prevLat) && now - prevGpsAt >= 500 && now - prevGpsAt < 10000) {
-            float meters = distanceMeters(prevLat, prevLon, lat, lon);
-            float speed = meters * 3600.0f / (now - prevGpsAt);
-            gpsSpeedKmh = meters < 3.0f ? 0.0f : (speed <= 160.0f ? speed : NAN);
-          }
-          prevLat = lat; prevLon = lon; prevGpsAt = now;
-        } else { gpsSpeedKmh = NAN; prevLat = prevLon = NAN; }
-      }
     }
   }
 }
 void jsonHeader() { server.sendHeader("Cache-Control", "no-store"); server.sendHeader("Access-Control-Allow-Origin", "*"); }
 void sendGps() {
-  readCan();
-  Sample *g = sampleFor(0x400);
-  bool valid = fresh(g, 3000) && g->bytes[6] && g->bytes[0] <= 90 && g->bytes[3] <= 180 &&
-               be16(g->bytes+1) < 6000 && be16(g->bytes+4) < 6000;
-  String json = "{\"fix\":"; json += valid ? "true" : "false";
-  if (valid) {
-    json += ",\"lat\":" + String(g->bytes[0] + be16(g->bytes+1)/6000.0, 6);
-    json += ",\"lon\":" + String(g->bytes[3] + be16(g->bytes+4)/6000.0, 6);
-    json += ",\"sats\":" + String(g->bytes[7]);
-    json += ",\"ageMs\":" + String(millis() - g->at);
-    if (isfinite(gpsSpeedKmh)) json += ",\"speed\":" + String(gpsSpeedKmh, 1);
-  }
-  json += "}"; jsonHeader(); server.send(200, "application/json", json);
+  serviceGps(); jsonHeader(); server.send(200, "application/json", gpsJson());
 }
 void sendSpeed() {
-  readCan(); Sample *g = sampleFor(0x400);
-  const bool valid = fresh(g, 3000) && g->bytes[6] && isfinite(gpsSpeedKmh);
-  jsonHeader(); server.send(200, "application/json", valid ? "{\"value\":" + String(gpsSpeedKmh, 1) + "}" : "{\"value\":null}");
+  serviceGps(); jsonHeader();
+  server.send(200, "application/json", gpsHasSpeed()?"{\"value\":"+String(gps.speed.kmph(),1)+"}":"{\"value\":null}");
 }
 String maybeNumber(bool valid, float value, unsigned decimals = 0) { return valid ? String(value, decimals) : "null"; }
 String maybeBool(bool valid, bool value) { return valid ? (value ? "true" : "false") : "null"; }
@@ -165,10 +195,15 @@ void sendVehicle() {
   readCan();
   Sample *steer=sampleFor(0x100), *lamps=sampleFor(0x101), *immo=sampleFor(0x151), *cmd=sampleFor(0x200);
   Sample *motor=sampleFor(0x201), *sw=sampleFor(0x300), *accel=sampleFor(0x301), *brake=sampleFor(0x302);
-  Sample *ign=sampleFor(0x401), *hill=sampleFor(0x500), *summon=sampleFor(0x501);
+  Sample *summon=sampleFor(0x501), *pitch=sampleFor(WHEEL_PITCH_ID), *physical=sampleFor(DRIVE_SWITCH_STATUS_ID), *horn=sampleFor(WIRELESS_HORN_STATUS_ID);
   bool a=fresh(steer, STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(steer->bytes, millis()-steer->at);
   bool l=fresh(lamps, 500), m=fresh(motor, 250), s=fresh(sw, 3001);
-  bool p=fresh(accel, 501), b=fresh(brake, 250), i=fresh(ign, 3000), h=fresh(hill, 1000);
+  bool p=fresh(accel, 501), b=fresh(brake, 250);
+  const bool physicalLive=fresh(physical,350), switchesLive=physicalLive || s;
+  const uint8_t physicalMask=physicalLive?physical->bytes[1]:sw->bytes[0];
+  const bool hornLive=fresh(horn,STEERING_FEEDBACK_TIMEOUT_MS);
+  const bool hornKnown=hornLive && wirelessHornInputFresh(horn->bytes,millis()-horn->at);
+  const bool pitchLive=fresh(pitch,STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(pitch->bytes,millis()-pitch->at);
   String j; j.reserve(1600);
   j = "{\"canReady\":"; j += canReady ? "true" : "false";
   j += ",\"frames\":" + String(frameCount);
@@ -176,7 +211,12 @@ void sendVehicle() {
   j += ",\"steeringLink\":" + String(a ? "true" : "false");
   j += ",\"steeringAgeMs\":" + (steer->seen ? String(millis()-steer->at+steer->bytes[2]) : "null");
   j += ",\"steeringSequence\":" + (steer->seen ? String(steeringAngleSequence(steer->bytes)) : "null");
-  j += ",\"horn\":" + maybeBool(l, lamps->bytes[0]);
+  j += ",\"horn\":" + maybeBool(hornLive, horn->bytes[0]);
+  j += ",\"hornWirelessPressed\":" + maybeBool(hornKnown,horn->bytes[1]&2);
+  j += ",\"hornWebsitePressed\":" + maybeBool(hornLive,horn->bytes[1]&4);
+  j += ",\"hornInputAvailable\":" + String(hornKnown?"true":"false");
+  j += ",\"hornSourceAgeMs\":" + (hornKnown?String(millis()-horn->at+horn->bytes[2]):"null");
+  j += ",\"hornRelayPin\":13";
   j += ",\"headlight\":" + maybeBool(l, lamps->bytes[1]);
   j += ",\"immoState\":" + maybeNumber(fresh(immo, 3000), immo->bytes[0]);
   j += ",\"immoCommand\":" + maybeNumber(fresh(cmd, 3000), cmd->bytes[0]);
@@ -188,6 +228,10 @@ void sendVehicle() {
   j += ",\"cruiseActive\":" + maybeBool(m, motor->bytes[4]);
   j += ",\"ecoActive\":" + maybeBool(m, motor->bytes[5]);
   j += ",\"hillActive\":" + maybeBool(m, motor->bytes[6]);
+  j += ",\"hillAvailable\":false,\"hillReason\":\"Wheel IMU rotates; chassis pitch required\"";
+  j += ",\"wheelPitchDeg\":"+maybeNumber(pitchLive,steeringAngleTenths(pitch->bytes)/10.0f,1);
+  j += ",\"wheelPitchValid\":"+String(pitchLive?"true":"false");
+  j += ",\"wheelPitchSource\":\"steering-wheel\",\"wheelPitchForControl\":false";
   const uint16_t adc = le16(accel->bytes);
   j += ",\"acceleratorAdc\":" + maybeNumber(p, adc);
   // Remove the measured idle offset; retain raw ADC and raw pin-voltage estimate.
@@ -195,18 +239,13 @@ void sendVehicle() {
   j += ",\"acceleratorVoltageEstimate\":" + maybeNumber(p, throttleVoltage(adc), 3);
   j += ",\"acceleratorRawVoltageEstimate\":" + maybeNumber(p, throttleRawVoltage(adc), 3);
   j += ",\"brake\":" + maybeBool(b, brake->bytes[0]);
-  j += ",\"ignition\":" + maybeBool(i, ign->bytes[0]);
-  j += ",\"ignitionUptime\":" + maybeNumber(i, be16(ign->bytes+1));
-  j += ",\"hillRequest\":" + maybeBool(h, hill->bytes[0]);
-  j += ",\"pitchDeg\":" + maybeNumber(h && hill->bytes[3], (int)hill->bytes[1]-90);
-  j += ",\"pitchValid\":" + maybeBool(h, hill->bytes[3]);
-  j += ",\"holdPct\":" + maybeNumber(h, hill->bytes[2]);
   j += ",\"summonActive\":" + maybeBool(fresh(summon, 250), summon->bytes[4]);
   const char *names[] = {"cruise","hill","autonomous","remoteMode","horn","reverse"};
   j += ",\"switches\":{";
-  for (uint8_t n=0; n<SWITCH_COUNT; ++n) { if (n) j += ','; j += "\"" + String(names[n]) + "\":" + maybeBool(s, sw->bytes[0] & (1U << n)); }
+  for (uint8_t n=0; n<SWITCH_COUNT; ++n) { if (n) j += ','; j += "\"" + String(names[n]) + "\":" + maybeBool(switchesLive, physicalMask & (1U << n)); }
   j += "},\"nodes\":[";
   for (uint8_t n=1; n<=5; ++n) {
+    if (n==4) continue;
     if (n>1) j += ',';
     if (n == 2 && !nodes[2].seen) {
       // Older receive-only Node 2 firmware remains unobservable.
@@ -329,22 +368,25 @@ void sendDiagnostics() {
   j += ",\"canReady\":" + String(canReady ? "true" : "false");
   j += ",\"rxTotal\":" + String(canRxTotal) + ",\"txTotal\":" + String(canTxTotal);
   j += ",\"txFailed\":" + String(canTxFailed);
+  j += ",\"canRecoveryFaults\":"+String(canRecovery.faults)+",\"canRecoveryResets\":"+String(canRecovery.restarts);
+  j += ",\"canRecoveryPending\":"+String(canRecovery.pending?"true":"false")+",\"canLastFault\":\""+String(canRecovery.message())+"\"";
+  j += ",\"canErrorFlags\":"+String(canRecovery.errorFlags)+",\"canTxErrors\":"+String(canRecovery.txErrors)+",\"canRxErrors\":"+String(canRecovery.rxErrors);
   j += ",\"lastRxAgeMs\":" + (canRxTotal ? String(millis() - canLastRxAt) : "null");
   j += ",\"malformedFrames\":" + String(malformedFrames) + ",\"unknownFrames\":" + String(unknownFrames);
   j += ",\"signals\":[";
-  const uint16_t signalIds[] = {0x301,0x300,0x400,0x401,0x500,0x111,0x121,0x122,STEERING_ANGLE_ID,0x124};
-  const uint16_t timeouts[] = {501,3001,3000,3000,1000,600,350,350,STEERING_FEEDBACK_TIMEOUT_MS,350};
+  const uint16_t signalIds[] = {0x301,0x300,0x111,0x121,0x122,STEERING_ANGLE_ID,WHEEL_PITCH_ID,WIRELESS_HORN_STATUS_ID,0x124};
+  const uint16_t timeouts[] = {501,3001,600,350,350,STEERING_FEEDBACK_TIMEOUT_MS,STEERING_FEEDBACK_TIMEOUT_MS,STEERING_FEEDBACK_TIMEOUT_MS,350};
   for (uint8_t n=0; n<sizeof(signalIds)/sizeof(signalIds[0]); ++n) {
     const Sample *s = sampleFor(signalIds[n]);
     if (n) j += ',';
     j += "{\"id\":" + String(signalIds[n]) + ",\"seen\":" + String(s->seen ? "true" : "false");
-    const bool live = fresh(s, timeouts[n]) && (signalIds[n] != STEERING_ANGLE_ID || steeringAngleFrameFresh(s->bytes, millis()-s->at));
+    const bool live = fresh(s, timeouts[n]) && ((signalIds[n] != STEERING_ANGLE_ID && signalIds[n] != WHEEL_PITCH_ID) || steeringAngleFrameFresh(s->bytes, millis()-s->at));
     j += ",\"fresh\":" + String(live ? "true" : "false");
     j += ",\"ageMs\":" + (s->seen ? String(millis()-s->at) : "null");
     j += ",\"timeoutMs\":" + String(timeouts[n]) + ",\"dlc\":" + String(s->len);
     j += ",\"received\":" + String(s->received) + ",\"invalid\":" + String(s->invalid) + "}";
   }
-  j += "]}"; jsonHeader(); server.send(200, "application/json", j);
+  j += "],\"gps\":"+gpsJson()+"}"; jsonHeader(); server.send(200, "application/json", j);
 }
 void sendDashboard() {
   if (!sendFile("/index.html")) server.send(404,"text/plain","website missing: upload LittleFS data");
@@ -367,9 +409,25 @@ void stopSteeringRelay() {
   const uint8_t data[8] = {};
   sendLoggedCan(STEERING_COMMAND_ID, data);
 }
+bool hornNodeReady(){return canReady && fresh(sampleFor(WIRELESS_HORN_STATUS_ID),250) && !hornStopPending;}
+void stopHornRelay(){
+  hornRelay.stop();hornStopToken=steeringRead32(sampleFor(WIRELESS_HORN_STATUS_ID)->bytes+4);
+  hornStopPending=true;hornStopAt=millis();
+  const uint8_t d[8]={};sendLoggedCan(HORN_COMMAND_ID,d);
+}
+void serviceHornHost(){
+  const Sample *s=sampleFor(WIRELESS_HORN_STATUS_ID);
+  if(hornStopPending){
+    if(fresh(s,250) && steeringRead32(s->bytes+4)!=hornStopToken)hornStopPending=false;
+    else if(millis()-hornStopAt>=100){const uint8_t d[8]={};sendLoggedCan(HORN_COMMAND_ID,d);hornStopAt=millis();}
+  }
+  if(hornRelay.direction && (!driveRemoteModeEnabled() || !hornNodeReady() || steeringRead32(s->bytes+4)!=hornRelay.nodeToken))stopHornRelay();
+  else if(hornRelay.direction && millis()-hornRelay.lastCommandAt>=350)stopHornRelay();
+}
 void serviceSteeringRelay() {
+  serviceHornHost();
   const Sample *s = sampleFor(STEERING_STATUS_ID);
-  if (steeringRelay.direction && (!steeringNodeReady() || steeringRead32(s->bytes+4) != steeringRelay.nodeToken)) {
+  if (steeringRelay.direction && (!driveRemoteModeEnabled() || !steeringNodeReady() || steeringRead32(s->bytes+4) != steeringRelay.nodeToken)) {
     if(drive.held && drive.steeringOwned) stopDrive("STEERING OUTPUT LINK LOST");
     else stopSteeringRelay();
   } else if (steeringRelay.tick(millis())) {
@@ -384,11 +442,13 @@ void sendSteeringState() {
   const Sample *angle = sampleFor(STEERING_ANGLE_ID);
   const bool statusLive = fresh(s, 600);
   const bool angleLive = fresh(angle, STEERING_FEEDBACK_TIMEOUT_MS) && steeringAngleFrameFresh(angle->bytes, millis()-angle->at);
-  const bool ready = steeringNodeReady();
+  const bool remoteModeKnown=driveRemoteModeKnown(),remoteMode=driveRemoteModeEnabled();
+  const bool ready = remoteMode && steeringNodeReady();
   String j = "{\"ready\":" + String(ready ? "true" : "false");
   j += ",\"controlVersion\":3,\"angleRequired\":false,\"canReady\":" + String(canReady ? "true" : "false");
   j += ",\"nodeSeen\":" + String(s->seen ? "true" : "false") + ",\"nodeInvalid\":" + String(s->invalid);
-  j += ",\"message\":\"" + String(steeringLinkMessage()) + "\"";
+  const char *message=!remoteModeKnown ? "WAITING FOR REMOTE MODE SWITCH" : !remoteMode ? "TURN ON REMOTE MODE SWITCH" : steeringLinkMessage();
+  j += ",\"message\":\"" + String(message) + "\"";
   j += ",\"token\":" + String(steeringRelay.token);
   j += ",\"direction\":" + (statusLive ? String(s->bytes[0]) : "null");
   j += ",\"pwm\":" + (statusLive ? String(s->bytes[1]) : "null");
@@ -410,6 +470,35 @@ bool steeringDecimal(const String &s, uint32_t &value) {
   }
   value = parsed; return true;
 }
+void sendHornState(){
+  readCan();serviceHornHost();
+  const Sample *s=sampleFor(WIRELESS_HORN_STATUS_ID);
+  const bool live=canReady && fresh(s,250),ready=live && !hornStopPending && driveRemoteModeEnabled();
+  String j="{\"ready\":"+String(ready?"true":"false")+",\"token\":"+String(hornRelay.token);
+  j+=",\"held\":"+String(hornRelay.direction?"true":"false")+",\"active\":"+maybeBool(live,s->bytes[0]);
+  j+=",\"wirelessPressed\":"+maybeBool(live && wirelessHornInputFresh(s->bytes,millis()-s->at),s->bytes[1]&2);
+  j+=",\"message\":\""+String(!driveRemoteModeEnabled()?"TURN ON REMOTE MODE SWITCH":!live?"WAITING FOR NODE 1 HORN STATUS":hornStopPending?"WAITING FOR HORN RELEASE ACK":"")+"\"}";
+  server.sendHeader("Cache-Control","no-store");server.send(200,"application/json",j);
+}
+void handleHornCommand(){
+  server.sendHeader("Cache-Control","no-store");
+  if(server.header("X-SRT-Control")!="1" || (server.hasHeader("Origin") && server.header("Origin")!="http://"+server.hostHeader())){
+    server.send(403,"application/json","{\"error\":\"Same-origin control required\"}");return;
+  }
+  readCan();serviceHornHost();
+  if(server.arg("action")=="stop"){stopHornRelay();sendHornState();return;}
+  uint32_t token,seq;
+  if(server.arg("action")!="press" || !steeringDecimal(server.arg("token"),token) || !steeringDecimal(server.arg("seq"),seq) || !seq || seq>65535){
+    stopHornRelay();server.send(400,"application/json","{\"error\":\"Invalid horn command\"}");return;
+  }
+  const bool ready=hornNodeReady() && driveRemoteModeEnabled();
+  if(!hornRelay.accept(1,seq,token,steeringRead32(sampleFor(WIRELESS_HORN_STATUS_ID)->bytes+4),ready,millis())){
+    stopHornRelay();server.send(ready?409:503,"application/json","{\"error\":\"Release and retry\"}");return;
+  }
+  uint8_t d[8]={1,1,(uint8_t)seq,(uint8_t)(seq>>8),0,0,0,0};steeringWrite32(d+4,hornRelay.nodeToken);
+  if(!sendLoggedCan(HORN_COMMAND_ID,d)){stopHornRelay();server.send(503,"application/json","{\"error\":\"CAN send failed\"}");return;}
+  sendHornState();
+}
 void handleSteeringCommand() {
   server.sendHeader("Cache-Control", "no-store");
   if (server.header("X-SRT-Control") != "1" ||
@@ -425,7 +514,7 @@ void handleSteeringCommand() {
     stopSteeringRelay(); server.send(400,"application/json","{\"error\":\"Invalid steering command\"}"); return;
   }
   const Sample *s = sampleFor(STEERING_STATUS_ID);
-  const bool ready = steeringNodeReady();
+  const bool ready = driveRemoteModeEnabled() && steeringNodeReady();
   if (!steeringRelay.accept(dir=="left" ? 1 : 2, seq, token, steeringRead32(s->bytes+4), ready, millis())) {
     stopSteeringRelay(); server.send(ready ? 409 : 503,"application/json","{\"error\":\"Release and retry\"}"); return;
   }
@@ -442,13 +531,74 @@ bool driveCapable() {
   return canReady && fresh(sampleFor(0x121),250) && fresh(sampleFor(0x122),250) &&
     fresh(sampleFor(DRIVE_MOTOR_STATUS_ID),250) && fresh(sampleFor(0x201),250);
 }
+bool mobilityKnown() {return canReady && fresh(sampleFor(TRACTION_MODE_STATUS_ID),350);}
+bool mobilityEnabled() {return requestedMobility!=0 && (!mobilityKnown() || sampleFor(TRACTION_MODE_STATUS_ID)->bytes[0]);}
+bool sendMobility(bool mobile,uint32_t token) {
+  uint8_t data[8]={(uint8_t)mobile,TRACTION_MODE_VERSION,0,0,0,0,0,0};
+  steeringWrite32(data+4,token);
+  return sendLoggedCan(TRACTION_MODE_COMMAND_ID,data);
+}
+void serviceMobility() {
+  if(requestedMobility<0 || !canReady || millis()-mobilitySentAt<100)return;
+  const Sample *s=sampleFor(TRACTION_MODE_STATUS_ID);
+  if(mobilityKnown() && bool(s->bytes[0])==bool(requestedMobility)) {
+    if(requestedMobility==1)requestedMobility=-1;
+    return;
+  }
+  if(requestedMobility==1 && mobilityKnown() && tractionModeToken(s->bytes)!=mobilityEnableToken) {
+    requestedMobility=-1;return;
+  }
+  mobilitySentAt=millis();sendMobility(requestedMobility==1,mobilityEnableToken);
+}
+void sendMobilityState() {
+  readCan();serviceMobility();
+  const Sample *s=sampleFor(TRACTION_MODE_STATUS_ID);const bool known=mobilityKnown();
+  const bool pending=requestedMobility>=0 && (!known || bool(s->bytes[0])!=bool(requestedMobility));
+  String j="{\"ready\":"+String(known?"true":"false")+",\"mobile\":"+maybeBool(known,s->bytes[0]);
+  j+=",\"pending\":"+String(pending?"true":"false")+",\"token\":"+String(known?tractionModeToken(s->bytes):0);
+  j+=",\"appliedThrottlePwm\":"+maybeNumber(known,s->bytes[2])+",\"idlePwm\":"+String(DRIVE_REST_PWM)+"}";
+  server.sendHeader("Cache-Control","no-store");server.send(200,"application/json",j);
+}
+void handleMobilityCommand() {
+  if(server.header("X-SRT-Control")!="1" || (server.hasHeader("Origin") && server.header("Origin")!="http://"+server.hostHeader())) {
+    server.send(403,"application/json","{\"error\":\"Same-origin control required\"}");return;
+  }
+  readCan();const String action=server.arg("action");uint32_t token=0;
+  if(action!="immobile" && action!="mobile") {server.send(400,"application/json","{\"error\":\"Invalid mobility command\"}");return;}
+  if(action=="mobile" && (!mobilityKnown() || !steeringDecimal(server.arg("token"),token) || token!=tractionModeToken(sampleFor(TRACTION_MODE_STATUS_ID)->bytes))) {
+    server.send(409,"application/json","{\"error\":\"Wait for vehicle status and retry\"}");return;
+  }
+  requestedMobility=action=="mobile"?1:0;mobilityEnableToken=token;
+  if(requestedMobility==0) {
+    mobilityBlockedSession=drive.session;drive.pwm=drive.percent=0;
+    if(drive.held && drive.paired)sendDrivePWM(0);
+  }
+  mobilitySentAt=millis();
+  if(!sendMobility(requestedMobility==1,token)) {server.send(503,"application/json","{\"error\":\"CAN unavailable\"}");return;}
+  sendMobilityState();
+}
+bool driveRemoteModeKnown() {
+  return fresh(sampleFor(DRIVE_SWITCH_STATUS_ID),350) || fresh(sampleFor(0x300),3001);
+}
+bool driveRemoteModeEnabled() {
+  // Node 3 silences 0x300 during remote ownership, but keeps publishing its
+  // actual physical switches on 0x122. Prefer that live source throughout.
+  const Sample *physical=sampleFor(DRIVE_SWITCH_STATUS_ID);
+  if(fresh(physical,350)) return physical->bytes[1]&SWITCH_REMOTE_MODE;
+  return fresh(sampleFor(0x300),3001) && (sampleFor(0x300)->bytes[0]&SWITCH_REMOTE_MODE);
+}
+bool driveHillSelected() {
+  const Sample *physical=sampleFor(DRIVE_SWITCH_STATUS_ID);
+  if(fresh(physical,350))return physical->bytes[1]&SWITCH_HILL_HOLD;
+  return fresh(sampleFor(0x300),3001) && (sampleFor(0x300)->bytes[0]&SWITCH_HILL_HOLD);
+}
 bool drivePedalIdle() { return driveCapable() && le16(sampleFor(0x121)->bytes+1)<=DRIVE_IDLE_ADC; }
 bool driveGateAt(uint16_t id, uint8_t phase) {
   const Sample *s = sampleFor(id);
   return fresh(s,250) && (s->bytes[0]&3)==phase && driveRead32(s->bytes+4)==drive.session;
 }
 bool driveReady() {
-  return driveCapable() && (drive.held || (drivePedalIdle() &&
+  return !driveHillSelected() && driveRemoteModeEnabled() && driveCapable() && (drive.held || (drivePedalIdle() &&
     (sampleFor(0x121)->bytes[0]&3)!=1 && (sampleFor(0x122)->bytes[0]&3)!=1 &&
     (sampleFor(0x124)->bytes[0]&3)!=1));
 }
@@ -476,6 +626,7 @@ void beginDrive(bool steeringOwned,bool reverse,bool shiftOnly=false) {
   drive.completedShiftToken=0;
   drive.pwmMode=true; drive.steeringOwned=steeringOwned; drive.shiftOnly=shiftOnly;
   drive.session=drive.token; drive.gateSeq=drive.pwmSeq=0; drive.pwm=drive.percent=0;
+  if(!mobilityEnabled())mobilityBlockedSession=drive.session;
   drive.started=millis(); drive.paired=false; drive.held=true; drive.reason="";
   drive.wireReverse=driveAppliedReverse();
   drive.reverse=reverse; drive.directionSet=true; drive.lastTx=millis()-50;
@@ -492,10 +643,14 @@ void stopDrive(const char *reason="") {
 }
 void expireDriveCommand() {
   const uint32_t now=millis();
-  if(drive.held && (now-drive.lastHttp>=DRIVE_LEASE_MS || now-drive.started>=DRIVE_HOLD_MS)) stopDrive("RELEASE & RETRY");
+  const uint32_t httpLease=drive.steeringOwned || drive.shiftOnly ? DRIVE_LEASE_MS : DRIVE_HTTP_LEASE_MS;
+  if(drive.held && now-drive.lastHttp>=httpLease) stopDrive("RELEASE & RETRY");
+  if(drive.held && driveHillSelected()) stopDrive("HILL ASSIST UNAVAILABLE: CHASSIS PITCH REQUIRED");
+  if(drive.held && !driveRemoteModeEnabled()) stopDrive("REMOTE MODE OFF");
   if(drive.held && (!driveCapable() || (drive.steeringOwned && !steeringNodeReady()))) stopDrive("LINK FAULT");
 }
 void serviceDrive() {
+  serviceMobility();
   expireDriveCommand();
   const uint32_t now=millis();
   if(!drive.session || now-drive.lastTx<50) return;
@@ -529,9 +684,9 @@ void serviceDrive() {
   }
   if(!sendDriveGate(1)) { stopDrive("CAN SEND FAILED"); return; }
   if(!paired) return;
-  const bool ready=output->bytes[7]==0 && bool(output->bytes[2])==drive.wireReverse &&
+  const bool ready=(output->bytes[7]==0 || output->bytes[7]==11) && bool(output->bytes[2])==drive.wireReverse &&
     driveAppliedReverse()==drive.wireReverse;
-  const uint8_t demand=!drive.shiftPhase && ready ? drive.pwm : 0;
+  const uint8_t demand=!drive.shiftPhase && ready && mobilityEnabled() && drive.session!=mobilityBlockedSession ? drive.pwm : 0;
   if(drive.shiftPhase && !drive.shiftSent) {
     drive.shiftAckCount=motor->received; drive.shiftSent=true;
   }
@@ -544,19 +699,23 @@ void serviceDrive() {
 void sendDriveState() {
   readCan(); serviceDrive();
   const bool capable=driveCapable();
+  const bool remoteModeKnown=driveRemoteModeKnown(),remoteMode=driveRemoteModeEnabled();
   if(!drive.held && driveManualMode()) drive.reverse=driveAppliedReverse();
   const char *message=drive.reason;
-  if(!capable) message="WAITING FOR CONTROL NODES";
+  if(!remoteModeKnown) message="WAITING FOR REMOTE MODE SWITCH";
+  else if(!remoteMode) message="TURN ON REMOTE MODE SWITCH";
+  else if(driveHillSelected()) message="HILL ASSIST UNAVAILABLE: CHASSIS PITCH REQUIRED";
+  else if(!capable) message="WAITING FOR CONTROL NODES";
   else if(!drive.held && !drivePedalIdle()) message="RELEASE PEDAL";
   else if(drive.held && !drive.paired) message="TAKING REMOTE CONTROL";
   else if(drive.held && drive.shiftPhase) message="WAITING FOR IDLE / DIRECTION ACK";
   else if(!drive.held && drive.session && bool(sampleFor(0x122)->bytes[1]&SWITCH_REVERSE)!=drive.wireReverse) message="MATCH REVERSE SWITCH FOR MANUAL";
-  String j="{\"ready\":"+String(driveReady()?"true":"false")+",\"token\":"+String(drive.token);
+  String j="{\"ready\":"+String(driveReady()?"true":"false")+",\"remoteMode\":"+maybeBool(remoteModeKnown,remoteMode)+",\"token\":"+String(drive.token);
   j+=",\"held\":"+String(drive.held?"true":"false")+",\"adc\":0,\"percent\":"+String(drive.percent);
   j+=",\"throttlePwm\":"+String(drive.pwm)+",\"appliedThrottlePwm\":"+maybeNumber(capable,le16(sampleFor(0x124)->bytes+1));
   j+=",\"reverse\":"+String(drive.reverse?"true":"false")+",\"appliedReverse\":"+(capable?String(driveAppliedReverse()?"true":"false"):"null");
   j+=",\"shifting\":"+String(drive.held && drive.shiftPhase?"true":"false")+",\"canShift\":"+String(driveCanShift()?"true":"false");
-  j+=",\"message\":\""+String(message)+"\",\"timeoutMs\":350,\"holdMs\":5000}";
+  j+=",\"message\":\""+String(message)+"\",\"timeoutMs\":"+String(drive.shiftOnly?DRIVE_LEASE_MS:DRIVE_HTTP_LEASE_MS)+",\"renewMs\":"+String(DRIVE_HTTP_RENEW_MS)+"}";
   server.sendHeader("Cache-Control","no-store"); server.send(200,"application/json",j);
 }
 void handleDriveCommand() {
@@ -592,16 +751,32 @@ void handleDriveCommand() {
   else if(shifting && drive.reverse!=bool(reverse)) {
     stopDrive("RELEASE & RETRY"); server.send(409,"application/json","{\"error\":\"Direction changed during shift\"}"); return;
   }
-  drive.percent=percent; drive.pwm=shifting?0:(percent*255+50)/100;
+  drive.percent=mobilityEnabled() && drive.session!=mobilityBlockedSession?percent:0;
+  drive.pwm=shifting?0:(drive.percent*255+50)/100;
   drive.httpSeq=seq; drive.lastHttp=millis(); sendDriveState();
 }
 
 #include "JoystickHost.h"
 
+void serviceDashboardCan() {
+  static bool handled=false;
+  canService();
+  if(canReady) { handled=false; return; }
+  if(handled) return;
+  handled=true;
+  stopDrive("CAN RECOVERY: RELEASE & RETRY"); stopSteeringRelay(); stopHornRelay();
+  for(auto &s:samples) s.seen=false;
+  for(auto &n:nodes) n.seen=false;
+  canPrintStatus("Node 5 recovery");
+}
+
 void setup() {
   Serial.begin(115200);
+  gpsSerial.setRxBufferSize(2048);
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
   drive.token=esp_random(); if(!drive.token) drive.token=1;
   steeringRelay.token = esp_random(); if (!steeringRelay.token) steeringRelay.token = 1;
+  hornRelay.token=esp_random();if(!hornRelay.token)hornRelay.token=1;
   fsReady = LittleFS.begin(false);
   if (!fsReady) Serial.println("LittleFS unavailable: upload data/");
   if (!canBegin()) Serial.println("CAN unavailable: check MCP2515 wiring/crystal");
@@ -610,9 +785,13 @@ void setup() {
   const char *controlHeaders[] = {"X-SRT-Control", "Origin"};
   server.collectHeaders(controlHeaders, 2);
   server.on("/api/drive", HTTP_GET, sendDriveState);
+  server.on("/api/mobility", HTTP_GET, sendMobilityState);
+  server.on("/api/mobility", HTTP_POST, handleMobilityCommand);
   server.on("/api/drive", HTTP_POST, handleDriveCommand);
   server.on("/api/joystick", HTTP_GET, sendJoystickState);
   server.on("/api/joystick", HTTP_POST, handleJoystickCommand);
+  server.on("/api/horn", HTTP_GET, sendHornState);
+  server.on("/api/horn", HTTP_POST, handleHornCommand);
   server.on("/api/steering", HTTP_GET, sendSteeringState);
   server.on("/api/steering", HTTP_POST, handleSteeringCommand);
   server.on("/api/data", sendSpeed); server.on("/api/gps", sendGps);
@@ -630,11 +809,15 @@ void setup() {
   server.begin(); Serial.print("Dashboard: http://"); Serial.println(WiFi.softAPIP());
 }
 void loop() {
-  if (!canReady && millis()-lastCanAttempt>=1000) { canBegin(); lastCanAttempt=millis(); }
+  serviceDashboardCan();
+  if (!canReady && canRecovery.retryDue(millis(),lastCanAttempt)) { canBegin(); lastCanAttempt=millis(); }
   readCan(); serviceDrive(); serviceSteeringRelay(); server.handleClient(); readCan(); serviceDrive(); serviceSteeringRelay();
   if (millis()-lastBeat >= 1000) { lastBeat=millis(); canPrintStatus("Node 5 dashboard");
-    Serial.printf("Dashboard: WiFi clients=%u LittleFS=%s buffered frames=%u total frames=%lu | Node 1=%s Node 3=%s | Node 2 status: inspect 0x201/0x600\n",
+    Serial.printf("Dashboard: WiFi clients=%u LittleFS=%s buffered frames=%u total frames=%lu | Node 1=%s Node 3=%s | Node 2 status: inspect 0x201/0x602\n",
                   WiFi.softAPgetStationNum(), fsReady ? "READY" : "MISSING", logCount, (unsigned long)frameCount,
                   fresh(sampleFor(0x301), 501) ? "LIVE" : "NO RECENT DATA", fresh(sampleFor(0x300), 3001) ? "LIVE" : "NO RECENT DATA");
+    Serial.printf("GPS UART RX16/TX17: receiving=%u fix=%u chars=%lu checksums OK=%lu bad=%lu\n",
+                  gpsCharsSeen && millis()-gpsCharAt<GPS_TIMEOUT_MS, gpsHasFix(),
+                  (unsigned long)gps.charsProcessed(), (unsigned long)gps.passedChecksum(), (unsigned long)gps.failedChecksum());
     canHeartbeat(5, canReady?1:0, canReady?0:1); }
 }

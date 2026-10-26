@@ -8,6 +8,7 @@ from pathlib import Path
 import json
 import subprocess
 import tempfile
+from gps_test_support import gps_build_flags
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'node5_dash' / 'node5_dash.ino').read_text()
@@ -16,10 +17,13 @@ backend += source[source.index('void sendDiagnostics()'):source.index('void send
 backend += source[source.index('bool steeringNodeReady()'):source.index('void setup()')]
 shim = r'''
 #include <algorithm>
+#include <TinyGPS++.h>
 #include "ThrottleCalibration.h"
 #include "SteeringControl.h"
 #include "SteeringFeedback.h"
 #include "RemoteDrive.h"
+#include "CanRecovery.h"
+#include "TractionMode.h"
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -51,7 +55,18 @@ class String : public std::string {
 };
 uint32_t clockMs = 1000;
 uint32_t millis() { return clockMs; }
+struct HardwareSerial {
+  std::deque<char> input;
+  explicit HardwareSerial(int port){assert(port==2);}
+  int available(){return input.size();}
+  int read(){const char c=input.front();input.pop_front();return c;}
+  void setRxBufferSize(unsigned n){assert(n>=1024);}
+  void begin(unsigned baud,int,int rx,int tx){assert(baud==9600 && rx==16 && tx==17);}
+};
 bool canReady = true;
+CanRecovery canRecovery;
+void canService() {}
+void canPrintStatus(const char*) {}
 uint8_t canTxCount = 0, canRxCount = 0;
 uint32_t canTxTotal = 3, canRxTotal = 0, canTxFailed = 2, canLastRxAt = 0;
 struct EspMock { unsigned getFreeHeap(){return 140000;} unsigned getMinFreeHeap(){return 130000;} unsigned getMaxAllocHeap(){return 110000;} } ESP;
@@ -109,14 +124,39 @@ int main() {
     push(0x300, {uint8_t(1 << bit)});
     const std::string label = "bit-" + std::to_string(bit); vehicle(label.c_str());
   }
+  // Retired CAN GPS/ignition/pitch data cannot provide or overwrite local GPS.
   push(0x400, {10,17,16,79,0,117,1,8});
   push(0x401, {1,0,120,0,0,0,0,0});
   push(0x500, {1,85,0,1,0,0,0,0});
-  push(0x600, {4,1,4,0,10,20,0,0});
-  vehicle("node4"); sendGps(); record("gps");
-  // Invalid coordinates and IMU encoding must not replace the last good sample.
-  push(0x400, {90,1,0,79,0,0,1,8}); push(0x500, {1,181,0,1,0,0,0,0});
-  vehicle("invalid-domain"); sendDiagnostics(); record("diagnostics-domain");
+  vehicle("retired-node"); sendGps(); record("gps-empty");
+  assert(sampleFor(0x400)==nullptr && sampleFor(0x401)==nullptr && sampleFor(0x500)==nullptr);
+  // Feed the actual parser through the actual UART service, without CAN.
+  auto nmea=[](const std::string &body) {
+    unsigned checksum=0;for(char c:body)checksum^=(unsigned char)c;
+    char tail[8];snprintf(tail,sizeof(tail),"*%02X\r\n",checksum);
+    for(char c:"$"+body+tail)gpsSerial.input.push_back(c);
+    while(gpsSerial.available())serviceGps();
+  };
+  canReady=false;
+  nmea("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,");
+  nmea("GPRMC,123519,A,4807.038,N,01131.000,E,010.0,084.4,230394,003.1,W");
+  sendGps();record("gps-local");sendSpeed();record("gps-speed");
+  assert(gpsHasFix());assert(outgoing.empty());
+  nmea("GNGGA,123520,3350.000,S,15112.000,W,1,14,1.2,10.0,M,0.0,M,,");
+  nmea("GNRMC,123520,A,3350.000,S,15112.000,W,000.0,084.4,230394,003.1,W");
+  sendGps();record("gps-signed");
+  for(char c:std::string("$GPRMC,bad-checksum*00\r\n"))gpsSerial.input.push_back(c);
+  serviceGps();sendGps();record("gps-bad-checksum");
+  nmea("GNGGA,123521,,,,,0,00,99.9,,,,,,");
+  sendGps();record("gps-no-fix");sendSpeed();record("gps-no-speed");
+  nmea("GPRMC,123522,A,4807.038,N,01131.000,E,010.0,084.4,230394,003.1,W");
+  clockMs+=3000;sendGps();record("gps-stale");
+  // Bounded drains must preserve control-loop scheduling under a noisy UART.
+  gpsSerial.input.assign(1024,'x');serviceGps();assert(gpsSerial.available()==1024-GPS_READ_BUDGET);
+  while(gpsSerial.available())serviceGps();
+  clockMs=0xfffffff0;nmea("GPRMC,123522,A,4807.038,N,01131.000,E,010.0,084.4,230394,003.1,W");
+  clockMs=100;sendGps();record("gps-wrap");
+  canReady=true;clockMs=4001;
   log("no-match", "1FFFFFFF"); log("invalid-filter", "301junk");
   for (int n = 0; n < 70; ++n) push(0x301, {uint8_t(n),0});
   while (!incoming.empty()) readCan(); // Firmware drains in bounded batches.
@@ -132,13 +172,16 @@ int main() {
   server.headers["Origin"]="http://192.168.4.1";
   server.args["direction"]="left"; server.args["token"]=String(steeringRelay.token); server.args["seq"]="1";
   handleSteeringCommand(); assert(server.code==503 && outgoing.back().data[0]==0);
-  push(0x111, {0,0,0,1,9,0,0,0}); readCan();
+  push(0x111, {0,0,0,1,9,0,0,0}); push(0x300,{SWITCH_REMOTE_MODE}); readCan();
   server.args["token"]=String(steeringRelay.token);
   handleSteeringCommand(); assert(server.code==200); // Output status permits speed control without angle.
   assert(server.body.find("\"angleAvailable\":false")!=std::string::npos);
   stopSteeringRelay();
   push(0x100, {0xFE,0x3B,10,1,100,0,0,0}); // -45.3 deg; IMU packet already 10 ms old.
+  push(WHEEL_PITCH_ID,{0xFF,0xA6,10,1,101,0,0,0});
   vehicle("steering-live"); sendSteeringState(); record("steering-state");
+  vehicle("wheel-pitch");
+  push(WHEEL_PITCH_ID,{0x7F,0xFF,0,1,101,0,0,0});vehicle("wheel-pitch-invalid");
   push(0x100, {0x7F,0xFF,0,1,101,0,0,0}); vehicle("steering-invalid");
   push(0x100, {0,0,0,2,101,0,0,0}); readCan(); // Invalid live flag.
   server.args["token"]=String(steeringRelay.token);
@@ -185,13 +228,24 @@ int main() {
 
   testDrive();
   testJoystick();
+  // A local controller recovery clears cached status and invalidates gestures.
+  const auto beforeDrive=drive.token,beforeSteer=steeringRelay.token,beforeHorn=hornRelay.token;
+  canReady=false;serviceDashboardCan();
+  assert(!drive.held && !steeringRelay.direction && !hornRelay.direction);
+  assert(drive.token!=beforeDrive && steeringRelay.token!=beforeSteer && hornRelay.token!=beforeHorn);
+  for(const auto &s:samples)assert(!s.seen);
+  canReady=true;serviceDashboardCan();
+  // New heartbeat IDs must agree with the payload's node number.
+  push(0x602,{2,1,20,0,3,4,0,0});readCan();assert(nodes[2].seen);
+  const auto previous=nodes[2].at;clockMs+=10;
+  push(0x605,{2,1,20,0,3,4,0,0});readCan();assert(nodes[2].at==previous);
   // Rewritten Node 2 supplies actual output commands and a heartbeat.
   clockMs=20000;
   push(0x201, {1,1,0,0,0,0,0,0}); vehicle("node2-small-duty");
   push(0x201, {1,1,1,40,0,1,0,0});
   push(0x600, {2,1,20,0,3,4,0,0});
   vehicle("node2-live");
-  for(uint8_t reason=0;reason<=9;++reason) {
+  for(uint8_t reason=0;reason<=10;++reason) {
     push(0x201,{0,0,1,0,0,0,0,reason});
     const std::string label="node2-reason-"+std::to_string(reason);
     vehicle(label.c_str());
@@ -203,7 +257,7 @@ int main() {
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory)
     (path / 'check.cpp').write_text(shim + backend + (root / 'dashboard/tools/test-drive-api.h').read_text() + (root / 'dashboard/tools/test-joystick-api.h').read_text() + scenarios)
-    subprocess.run(['g++', '-I', str(root / 'node5_dash'), '-std=c++17', '-Wall', '-Wextra', str(path / 'check.cpp'), '-o', str(path / 'check')], check=True)
+    subprocess.run(['g++', *gps_build_flags(path), '-I', str(root / 'node5_dash'), '-std=c++17', '-Wall', '-Wextra', str(path / 'check.cpp'), '-o', str(path / 'check')], check=True)
     lines = subprocess.check_output([str(path / 'check')], text=True).splitlines()
 results = {}
 for line in lines:
@@ -247,9 +301,20 @@ assert result('full')['acceleratorAdc'] == 4095 and result('full')['acceleratorP
 names = ['cruise', 'hill', 'autonomous', 'remoteMode', 'horn', 'reverse']
 for bit, name in enumerate(names):
     assert result(f'bit-{bit}')['switches'] == {key: key == name for key in names}
-assert result('node4')['pitchDeg'] == -5 and result('node4')['ignitionUptime'] == 120
-assert result('node4')['nodes'][3]['alive'] is True
-assert result('gps')['fix'] is True and result('gps')['sats'] == 8
+assert [node['id'] for node in result('retired-node')['nodes']] == [1,2,3,5]
+assert not any(key in result('retired-node') for key in ['ignition','ignitionUptime','pitchDeg','pitchValid','holdPct'])
+assert result('gps-empty')['fix'] is False
+local = result('gps-local')
+assert local['source']=='local-uart' and local['fix'] and local['receiving'] and local['sats']==8
+assert abs(local['lat']-48.1173)<0.000001 and abs(local['lon']-11.516667)<0.000001
+assert local['rxPin']==16 and local['txPin']==17 and local['baud']==9600
+assert abs(result('gps-speed')['value']-18.5)<0.01
+assert result('gps-signed')['lat']<0 and result('gps-signed')['lon']<0 and result('gps-signed')['sats']==14
+assert result('gps-bad-checksum')['failedChecksum']==1
+assert result('gps-no-fix')['fix'] is False and result('gps-no-speed')['value'] is None
+assert result('gps-stale')['fix'] is False and not result('gps-stale')['receiving']
+assert result('gps-wrap')['fix'] and result('gps-wrap')['ageMs']==116
+print('Local GPS passed: real GP/GN NMEA, UART-only operation without CAN, signed coordinates, native speed, no-fix, bad checksum, timeout, bounded reads and clock wrap')
 assert result('no-match')['frames'] == []
 assert results['invalid-filter'][0] == 400
 assert len(result('ring')['frames']) == 64
@@ -268,15 +333,9 @@ assert d['malformedFrames'] == 5 and d['signals'][0]['invalid'] == 3
 assert d['signals'][0]['ageMs'] == 501 and not d['signals'][0]['fresh']
 d = result('diagnostics-wrap')
 assert d['signals'][0]['ageMs'] == 116 and d['signals'][0]['fresh']
-assert d['unknownFrames'] == 1 and d['lastRxAgeMs'] == 0
+assert d['unknownFrames'] == 4 and d['lastRxAgeMs'] == 0
 assert d['fsReady'] and d['fsUsed'] == 1500000 and d['txFailed'] == 2
 print('Diagnostics tests passed: counters, missing sensors, memory, storage, clock wrap')
-
-assert result('invalid-domain')['pitchDeg'] == -5
-assert result('diagnostics-domain')['malformedFrames'] == 7
-assert result('diagnostics-domain')['signals'][2]['invalid'] == 1
-assert result('diagnostics-domain')['signals'][4]['invalid'] == 1
-print('Invalid GPS and IMU payloads cannot replace valid samples')
 
 assert result("below-idle")["acceleratorVoltageEstimate"] == 0
 assert result("below-idle")["acceleratorPct"] == 0
@@ -305,7 +364,7 @@ n2 = result('node2-live')
 assert result('node2-small-duty')['motor1'] is True and result('node2-small-duty')['throttleOut'] == 0
 assert n2['throttleOut'] == 40 and n2['reverseActive'] is True
 assert n2['powertrainReason'] == 0
-for reason in range(10):
+for reason in range(11):
     assert result(f'node2-reason-{reason}')['powertrainReason'] == reason
 assert n2['nodes'][1]['alive'] is True and n2['nodes'][1]['source'] == 'heartbeat'
 assert n2['nodes'][1]['tx'] == 3 and n2['nodes'][1]['rx'] == 4
@@ -314,3 +373,7 @@ assert result('node2-output-stale')['powertrainReason'] is None
 assert result('node2-output-stale')['nodes'][1]['alive'] is True
 assert result('node2-offline')['nodes'][1]['alive'] is False
 print('Node 2 telemetry tests passed: output commands, heartbeat, independent expiry, receive-only compatibility')
+
+assert result('wheel-pitch')['wheelPitchValid'] and result('wheel-pitch')['wheelPitchDeg']==-9
+assert result('wheel-pitch-invalid')['wheelPitchDeg']==-9
+assert result('wheel-pitch')['wheelPitchForControl'] is False and result('wheel-pitch')['hillAvailable'] is False

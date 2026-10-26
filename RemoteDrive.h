@@ -8,12 +8,13 @@ constexpr uint32_t DRIVE_SWITCH_STATUS_ID = 0x122;
 constexpr uint32_t DRIVE_PWM_ID = 0x123;
 constexpr uint32_t DRIVE_MOTOR_STATUS_ID = 0x124;
 constexpr uint32_t DRIVE_LEASE_MS = 350;
-constexpr uint32_t DRIVE_HOLD_MS = 5000;
+// Browser hold renews every 2 s; Node 5 still renews the CAN lease every 50 ms.
+constexpr uint32_t DRIVE_HTTP_RENEW_MS = 2000;
+constexpr uint32_t DRIVE_HTTP_LEASE_MS = 2500;
 constexpr uint32_t DRIVE_SETTLE_MS = 1000;
-// GPIO34's existing 0..4095 = 0..3.3 V estimate. Release tolerance is
-// also defines the nonzero signal the motor controller expects at idle.
-constexpr uint16_t DRIVE_IDLE_ADC = 800UL * 4095 / 3300; // <=0.8 V: ADC 0..992.
-constexpr uint16_t DRIVE_REST_ADC = DRIVE_IDLE_ADC;
+// Pedal release tolerance is independent of the motor controller's idle level.
+constexpr uint16_t DRIVE_IDLE_ADC = 1000UL * 4095 / 3300; // <=1.0 V: ADC 0..1240.
+constexpr uint16_t DRIVE_REST_ADC = 800UL * 4095 / 3300; // Keep electrical idle at 0.8 V.
 // Nearest 8-bit duty to 0.8 V on a 3.3 V output: 62/255 (~0.802 V).
 constexpr uint8_t DRIVE_REST_PWM = (800UL * 255 + 1650) / 3300;
 inline uint16_t driveThrottleAdc(uint8_t percent) {

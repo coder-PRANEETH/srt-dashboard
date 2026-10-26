@@ -6,28 +6,30 @@ const path = require('node:path')
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const root = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'node5_dash', 'data'))
 const vehicle = {
+  horn:false,hornInputAvailable:true,hornWirelessPressed:false,
   canReady: true, frames: 42, acceleratorAdc: 2000, acceleratorPct: 32, acceleratorVoltageEstimate: 0.812, acceleratorRawVoltageEstimate: 1.612,
   steering: { available: true, direction: 0, pwm: 0, reason: 0, ageMs: 10 },
+  wheelPitchDeg:9,wheelPitchValid:true,wheelPitchForControl:false,hillAvailable:false,
   steeringDeg: -32.5, steeringLink: true, steeringAgeMs: 10, steeringSequence: 100,
-  ignition: true, ignitionUptime: 120, hillRequest: true, pitchDeg: 5, pitchValid: true, holdPct: 0,
   switches: { cruise: true, hill: false, autonomous: true, remoteMode: false, horn: false, reverse: true },
-  nodes: [1,2,3,4,5].map(id => ({ id, alive: id === 2 ? null : true, status: id === 2 ? null : 1, error: 0, ageMs: 10 })),
+  nodes: [1,2,3,5].map(id => ({ id, alive: id === 2 ? null : true, status: id === 2 ? null : 1, error: 0, ageMs: 10 })),
 }
-const gps = { fix: true, lat: 10.728, lon: 79.0195, sats: 8, speed: 20, ageMs: 20 }
-const diagnostics = { uptimeMs: 5000, freeHeap: 140000, minFreeHeap: 130000, largestFreeBlock: 110000, fsReady: true, fsTotal: 1966080, fsUsed: 1500000, clients: 1, canReady: true, rxTotal: 42, txTotal: 5, txFailed: 0, lastRxAgeMs: 20, malformedFrames: 0, unknownFrames: 0, signals: [0x301,0x300,0x400,0x401,0x500].map(id => ({ id, seen: true, fresh: true, ageMs: 20, invalid: 0, timeoutMs: id === 0x301 ? 501 : 3000 })) }
+const gps = { source: 'local-uart', receiving: true, rxAgeMs: 10, charsProcessed: 500, passedChecksum: 10, failedChecksum: 0, hdop: 1.2, fix: true, lat: 10.728, lon: 79.0195, sats: 8, speed: 20, ageMs: 20 }
+const diagnostics = { uptimeMs: 5000, freeHeap: 140000, minFreeHeap: 130000, largestFreeBlock: 110000, fsReady: true, fsTotal: 1966080, fsUsed: 1500000, clients: 1, canReady: true, rxTotal: 42, txTotal: 5, txFailed: 0, lastRxAgeMs: 20, malformedFrames: 0, unknownFrames: 0, signals: [0x301,0x300].map(id => ({ id, seen: true, fresh: true, ageMs: 20, invalid: 0, timeoutMs: id === 0x301 ? 501 : 3000 })) }
 let frames = [
   { seq: 1, ms: 1000, id: 0x301, dlc: 2, data: [0xD0,0x07] },
   { seq: 2, ms: 1000, id: 0x300, dlc: 1, data: [0x25] },
-  { seq: 3, ms: 1000, id: 0x500, dlc: 8, data: [1,90,0,0,0,0,0,0] },
+  { seq: 3, ms: 1000, id: 0x201, dlc: 8, data: [0,0,0,24,0,0,0,3] },
 ]
 const calls = {}, fail = new Set()
 const steering = {ready:true, token:99, direction:0, pwm:0, reason:0, ageMs:10, angleAvailable:true, angleDeg:-32.5, angleAgeMs:10, angleSequence:100}
 const steeringCommands=[]
-const drive={ready:true,token:100,held:false,adc:0,throttlePwm:0,appliedThrottlePwm:62,appliedReverse:false,shifting:false,reverse:false,canShift:true,message:''}
+const drive={ready:true,remoteMode:true,token:100,held:false,adc:0,throttlePwm:0,appliedThrottlePwm:62,appliedReverse:false,shifting:false,reverse:false,canShift:true,message:''}
+const joystick={ready:true,remoteMode:true,held:false,token:100,reverse:false,throttlePwm:0,steeringDirection:0,steeringPwm:0,angleDeg:null,appliedThrottlePwm:62,message:''}
 const driveCommands=[]
 let lastDrive=0,driveStopped=0
 function driveExpire() {
-  if(drive.held && Date.now()-lastDrive>=350){drive.held=false;drive.adc=0;drive.throttlePwm=0;drive.appliedThrottlePwm=62;++drive.token;driveStopped=Date.now()}
+  if(drive.held && Date.now()-lastDrive>=(drive.shifting?350:2500)){drive.held=false;drive.adc=0;drive.throttlePwm=0;drive.appliedThrottlePwm=62;++drive.token;driveStopped=Date.now()}
   drive.canShift=!drive.held && Date.now()-driveStopped>=1000
 }
 let lastMotion=0
@@ -35,7 +37,9 @@ function steeringExpire() {
   if(steering.direction && Date.now()-lastMotion>=350){steering.direction=0;steering.pwm=0;++steering.token}
 }
 const mime = { '.html':'text/html', '.js':'application/javascript', '.css':'text/css', '.png':'image/png', '.svg':'image/svg+xml' }
+const hornHttp=require('./horn-http.cjs')(()=>drive.remoteMode)
 const server = http.createServer((req,res) => {
+  if(hornHttp.handle(req,res))return
   const pathname = new URL(req.url,'http://localhost').pathname
   calls[pathname] = (calls[pathname] || 0)+1
   if(pathname==='/api/drive') {
@@ -54,6 +58,10 @@ const server = http.createServer((req,res) => {
       });return
     }
     res.writeHead(fail.has(pathname)?503:200,{'Content-Type':'application/json'});res.end(JSON.stringify(drive));return
+  }
+  if(pathname==='/api/joystick') {
+    const body={...joystick,ready:drive.remoteMode,remoteMode:drive.remoteMode}
+    res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(body));return
   }
   if(pathname==='/api/steering') {
     steeringExpire()
@@ -93,6 +101,17 @@ const server = http.createServer((req,res) => {
     await page.waitForFunction(()=>document.querySelector('.accel-reading')?.textContent==='32%')
     assert.match(await page.locator('.wheel-reading').innerText(),/-32.5°/)
     assert.equal(await page.locator('.wheel-rotor').evaluate(el=>el.style.getPropertyValue('--steering-angle')),'-32.5deg')
+    assert.equal(await page.locator('.mode-state').count(),6)
+    assert.match(await page.locator('.wheel-pitch').innerText(),/9.0°.*display only/)
+    vehicle.switches.remoteMode=true
+    await page.getByText('REMOTE MODE ENABLED',{exact:true}).waitFor()
+    await page.screenshot({animations:'disabled',path:'/tmp/srt-mode-banner.png'})
+    vehicle.switches.remoteMode=false;vehicle.switches.hill=true;vehicle.powertrainReason=10
+    await page.getByText('HILL ASSIST UNAVAILABLE',{exact:true}).waitFor()
+    assert.match(await page.locator('.hill-unavailable').innerText(),/pedal blocked at idle/)
+    vehicle.switches.hill=false;vehicle.powertrainReason=null
+    await page.waitForFunction(()=>!document.querySelector('.mode-announcement'))
+
     assert.equal(await page.locator('a[href*="status"]').count(),0)
     assert.equal(await page.getByRole('button',{name:'CONTROL'}).count(),0)
     assert.equal(await page.locator('a[href*="control"]').count(),0)
@@ -122,6 +141,11 @@ const server = http.createServer((req,res) => {
       assert.equal(await page.locator('.cockpit,.launch').count(),0)
       assert.equal(await page.getByRole('dialog').count(),0)
     }
+    drive.remoteMode=false;drive.ready=false
+    await page.goto(base+'/controls');await page.getByText('REMOTE MODE OFF',{exact:true}).waitFor()
+    assert.equal(await page.locator('.remote-grid,.joystick-pad,.joystick-layout,.joystick-stop,.horn-hold').count(),0,'Mobile controls are hidden while remote mode is off')
+    assert.equal(await page.getByRole('heading',{name:'Turn on the physical REMOTE MODE switch'}).count(),1)
+    drive.remoteMode=true;drive.ready=true
     await page.reload()
     await page.getByRole('button',{name:'BUTTONS ↗',exact:true}).click()
     await page.getByRole('heading',{name:'Control',exact:true}).waitFor()
@@ -131,6 +155,15 @@ const server = http.createServer((req,res) => {
     await page.setViewportSize({width:390,height:844})
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))
     await page.screenshot({animations:'disabled',path:'/tmp/srt-steering-mobile.png'})
+    const horn=page.getByRole('button',{name:'Hold horn to sound'})
+    await horn.waitFor();await page.waitForFunction(()=>!document.querySelector('.horn-hold')?.disabled)
+    await horn.focus();await page.keyboard.down(' ')
+    await page.waitForFunction(()=>document.querySelector('.horn-hold')?.getAttribute('aria-pressed')==='true')
+    await page.waitForResponse(r=>r.url().endsWith('/api/horn')&&r.request().method()==='POST')
+    assert.equal(hornHttp.state.active,true)
+    let hornRelease=page.waitForResponse(r=>r.url().endsWith('/api/horn')&&r.request().method()==='POST'&&new URLSearchParams(r.request().postData()).get('action')==='stop')
+    await page.keyboard.up(' ');await hornRelease;await page.waitForFunction(()=>document.querySelector('.horn-hold')?.getAttribute('aria-pressed')==='false')
+    assert.equal(hornHttp.state.active,false)
     const press=async button=>{const b=await button.boundingBox();await page.mouse.move(b.x+b.width/2,b.y+b.height/2);await page.mouse.down()}
     const waitCommand=async direction=>{await page.waitForResponse(r=>r.url().endsWith('/api/steering')&&r.request().method()==='POST'&&new URLSearchParams(r.request().postData()).get('direction')===direction)}
     let event=waitCommand('left');await press(left);await event
@@ -271,6 +304,17 @@ const server = http.createServer((req,res) => {
     vehicle.steeringDeg=null;vehicle.steeringLink=false;vehicle.acceleratorPct=null
     await page.getByText('UNAVAILABLE',{exact:true}).waitFor()
     assert.equal(await page.locator('.wheel-rotor').evaluate(el=>el.style.getPropertyValue('--steering-angle')),'-32.5deg')
+    assert.equal(await page.locator('.mode-state').count(),6)
+    assert.match(await page.locator('.wheel-pitch').innerText(),/9.0°.*display only/)
+    vehicle.switches.remoteMode=true
+    await page.getByText('REMOTE MODE ENABLED',{exact:true}).waitFor()
+    await page.screenshot({animations:'disabled',path:'/tmp/srt-mode-banner.png'})
+    vehicle.switches.remoteMode=false;vehicle.switches.hill=true;vehicle.powertrainReason=10
+    await page.getByText('HILL ASSIST UNAVAILABLE',{exact:true}).waitFor()
+    assert.match(await page.locator('.hill-unavailable').innerText(),/pedal blocked at idle/)
+    vehicle.switches.hill=false;vehicle.powertrainReason=null
+    await page.waitForFunction(()=>!document.querySelector('.mode-announcement'))
+
     assert.equal(await page.locator('.accel-reading').innerText(),'—%')
     vehicle.acceleratorPct=0
     await page.waitForFunction(()=>document.querySelector('.accel-reading')?.textContent==='0%')
@@ -304,8 +348,9 @@ const server = http.createServer((req,res) => {
     await page.waitForFunction(()=>[...document.querySelectorAll('.node-detail .sensor')].some(el=>el.textContent.includes('Motor stop reason')&&el.textContent.includes('UNAVAILABLE')))
     Object.assign(vehicle.nodes[1],savedMotor)
     vehicle.powertrainReason=null;vehicle.throttleOut=null;vehicle.reverseActive=null
-    await page.locator('.node').nth(3).click();assert.match(await page.locator('.node-detail').innerText(),/MPU6050 pitch/)
-    await page.locator('.node').nth(4).click();assert.match(await page.locator('.node-detail').innerText(),/136.7 KB/)
+    assert.equal(await page.locator('.node').count(),4)
+    await page.locator('.node').nth(3).click();assert.match(await page.locator('.node-detail').innerText(),/GPS receiver/)
+    assert.match(await page.locator('.node-detail').innerText(),/136.7 KB/)
     const filter=page.getByLabel('CAN ID'), rows=page.locator('.message')
     for(const id of ['301',' 0X00000301 ']) { await filter.fill(id); assert.equal(await rows.count(),1); assert.match(await rows.innerText(),/ADC 2000\/4095/) }
     await rows.locator('summary').click();assert.match(await rows.locator('.raw').innerText(),/D0 07/)
@@ -315,24 +360,24 @@ const server = http.createServer((req,res) => {
     await page.getByRole('button',{name:'RESET',exact:true}).click()
     await page.getByLabel('SEARCH',{exact:true}).fill('D0 07');assert.equal(await rows.count(),1)
     await page.getByRole('button',{name:'RESET',exact:true}).click()
-    await page.getByLabel('Issues only').check();assert.equal(await rows.count(),1);assert.match(await rows.innerText(),/Pitch unavailable/)
+    await page.getByLabel('Issues only').check();assert.equal(await rows.count(),1);assert.match(await rows.innerText(),/pedal missing/)
     await page.getByRole('button',{name:'RESET',exact:true}).click()
     await page.getByRole('button',{name:'PAUSE'}).click()
-    frames=[...frames,{seq:4,ms:2000,id:0x401,dlc:8,data:[1,0,120,0,0,0,0,0]}]
+    frames=[...frames,{seq:4,ms:2000,id:0x300,dlc:1,data:[0]}]
     await page.waitForResponse(r=>r.url().endsWith('/api/can-log'));assert.equal(await rows.count(),3)
     await page.getByRole('button',{name:'RESUME'}).click();await page.waitForFunction(()=>document.querySelectorAll('.message').length===4)
     await page.getByRole('button',{name:'COPY',exact:true}).click();await page.getByText('Copied',{exact:true}).waitFor()
     const copied=JSON.parse(await page.evaluate(()=>navigator.clipboard.readText()));assert.equal(copied.frames.length,4)
     const downloadPromise=page.waitForEvent('download');await page.getByRole('button',{name:'EXPORT'}).click()
     const download=await downloadPromise;const exported=JSON.parse(fs.readFileSync(await download.path(),'utf8'));assert.equal(exported.frames.length,4)
-    vehicle.pitchValid=false;vehicle.pitchDeg=null;vehicle.nodes[3].error=2;vehicle.nodes[3].status=0
+    gps.fix=false;gps.receiving=false;gps.sats=0
     await page.locator('.node').nth(3).click()
     await page.waitForFunction(()=>document.querySelectorAll('.node-detail .sensor.fault').length>0)
-    assert.match(await page.locator('.node-detail').innerText(),/error 2/)
+    await page.waitForFunction(()=>document.querySelector('.node-detail')?.textContent.includes('No recent UART data'))
     fail.add('/api/vehicle')
     await page.getByText('DISCONNECTED',{exact:true}).waitFor()
     assert.match(await page.locator('.node').nth(0).innerText(),/UNKNOWN/)
-    fail.clear();vehicle.pitchValid=true;vehicle.pitchDeg=5;vehicle.nodes[3].error=0;vehicle.nodes[3].status=1
+    fail.clear();gps.fix=true;gps.receiving=true;gps.sats=8
     await page.getByText('CONNECTED',{exact:true}).waitFor()
     await page.getByText(/Recovered · vehicle API/).waitFor()
     for(const [width,height] of [[390,844],[320,700],[800,480]]) {

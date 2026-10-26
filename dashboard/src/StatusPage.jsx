@@ -1,13 +1,13 @@
 import { useMemo, useState } from 'react'
 import { useNow, useTelemetry } from './useTelemetry'
-import { ageText, decodeFrame, diagnosticsModel, filterFrames, freshFeed, hex, NODE_NAMES, parseId } from './diagnostics'
+import { ageText, decodeFrame, diagnosticsModel, filterFrames, freshFeed, hex, NODE_IDS, NODE_NAMES, parseId } from './diagnostics'
 
 const EMPTY = []
 export default function StatusPage() {
   const { feeds, events } = useTelemetry(true), now = useNow()
-  const [selected, setSelected] = useState(4), [filters, setFilters] = useState({ id: '', node: '', query: '', issues: false })
+  const [selected, setSelected] = useState(5), [filters, setFilters] = useState({ id: '', node: '', query: '', issues: false })
   const [snapshot, setSnapshot] = useState(null), [notice, setNotice] = useState('')
-  const model = diagnosticsModel(feeds, now), node = model.nodes[selected - 1]
+  const model = diagnosticsModel(feeds, now), node = model.nodes.find(n => n.id === selected) || model.nodes[3]
   const source = snapshot || freshFeed(feeds.log, now)
   const raw = source?.frames || EMPTY
   const frames = useMemo(() => raw.slice(-64).map(decodeFrame).reverse(), [raw])
@@ -48,8 +48,8 @@ export default function StatusPage() {
         <div className="sensor-grid">{node.sensors.map(sensor => <div key={sensor.name} className={`sensor ${['UNAVAILABLE', 'FAULT'].includes(sensor.state) ? 'fault' : ''}`}><div className="sensor-title"><span>{sensor.name}</span><span className="sensor-state">{['UNAVAILABLE', 'FAULT'].includes(sensor.state) ? '! ' : ''}{sensor.state}</span></div><strong>{sensor.value}</strong>{sensor.detail && <small>{sensor.detail}</small>}</div>)}</div>
       </section>
       <section id="can-log" className="log-section" aria-labelledby="log-title"><div className="section-head"><div className="log-title"><h2 id="log-title">CAN log</h2><span className="pill live-pill">{snapshot ? 'Ⅱ PAUSED' : source ? '● LIVE' : 'UNAVAILABLE'}</span></div><div className="log-actions"><button className="button" disabled={!snapshot && !source} onClick={() => { setSnapshot(snapshot ? null : { ...source, capturedAt: feeds.log.at }); setNotice('') }}>{snapshot ? '▶ RESUME' : 'Ⅱ PAUSE'}</button><button className="button" disabled={!source} onClick={copy}>COPY</button><button className="button" disabled={!source} onClick={download}>EXPORT ↓</button></div></div>
-        <div className="filters"><div className="field"><label htmlFor="can-id">CAN ID</label><input id="can-id" value={filters.id} onChange={change('id')} autoComplete="off" spellCheck="false" placeholder="0x500" aria-invalid={invalidId} aria-describedby={invalidId ? 'log-empty' : undefined} /></div>
-          <div className="field"><label htmlFor="node-filter">NODE</label><select id="node-filter" value={filters.node} onChange={change('node')}><option value="">All nodes</option>{NODE_NAMES.map((name, n) => <option key={name} value={n + 1}>{n + 1} · {name}</option>)}</select></div>
+        <div className="filters"><div className="field"><label htmlFor="can-id">CAN ID</label><input id="can-id" value={filters.id} onChange={change('id')} autoComplete="off" spellCheck="false" placeholder="0x301" aria-invalid={invalidId} aria-describedby={invalidId ? 'log-empty' : undefined} /></div>
+          <div className="field"><label htmlFor="node-filter">NODE</label><select id="node-filter" value={filters.node} onChange={change('node')}><option value="">All nodes</option>{NODE_NAMES.map((name, n) => <option key={name} value={NODE_IDS[n]}>{NODE_IDS[n]} · {name}</option>)}</select></div>
           <div className="field search-field"><label htmlFor="search">SEARCH</label><input id="search" value={filters.query} onChange={change('query')} placeholder="Message or bytes" autoComplete="off" /></div>
           <div className="filter-extras"><label><input type="checkbox" checked={filters.issues} onChange={change('issues')} />Issues only</label><button className="button" onClick={() => { setFilters({ id: '', node: '', query: '', issues: false }); setNotice('') }}>RESET</button></div>
         </div><div className="log-meta"><span>{visible.length} / {frames.length} frames · {source?.total ?? '—'} total</span><span>64-FRAME BUFFER</span></div>

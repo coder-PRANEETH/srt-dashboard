@@ -12,11 +12,12 @@
  * TX 0x124 DLC8: remote ownership, applied reverse and PWM, every 100 ms.
  * TX 0x201 DLC8: motor1, motor2, applied reverse, throttle %, cruise active,
  *               reserved=0, hill active, stop reason (see pcmReason()).
- * TX 0x600 DLC8: Node 2 heartbeat, once per second.
+ * TX 0x602 DLC8: Node 2 heartbeat, once per second (unique sender ID).
  *
  * Traction and reverse outputs are enabled for the supplied vehicle wiring.
  * Override either enable to 0 for a bench build without that output.
- * Cruise, hill and autonomous requests never synthesize extra throttle.
+ * Cruise holds applied output. Hill selection locks throttle at idle because the
+ * available pitch sensor rotates with the wheel; autonomous remains a request.
  * Direction changes require an idle pedal command; PWM returns to idle before the
  * relays switch immediately, with no added pre-switch or settling delay.
  * Normal PWM changes ramp linearly; STOP/watchdogs return immediately to the
@@ -27,6 +28,7 @@
 #include "CanCommon.h"
 #include "ThrottleCalibration.h"
 #include "RemoteDrive.h"
+#include "TractionMode.h"
 #include <driver/gpio.h>
 
 #ifndef NODE2_ENABLE_TRACTION_OUTPUTS
@@ -49,8 +51,8 @@ uint8_t manualThrottlePercent(uint16_t adc) {
   const uint16_t bounded=adc<ACCEL_MIN_ADC?ACCEL_MIN_ADC:adc>ACCEL_MAX_ADC?ACCEL_MAX_ADC:adc;
   return (uint32_t)(bounded-ACCEL_MIN_ADC)*100/(ACCEL_MAX_ADC-ACCEL_MIN_ADC);
 }
-// Idle-to-full rise takes 1000 ms; full-to-idle fall takes 400 ms.
-constexpr uint32_t THROTTLE_RAMP_UP_MS = 1000, THROTTLE_RAMP_DOWN_MS = 400;
+// Slow the torque rise to soften initial acceleration; keep release response quick.
+constexpr uint32_t THROTTLE_RAMP_UP_MS = 2500, THROTTLE_RAMP_DOWN_MS = 400;
 // Discard excess elapsed time after a delayed loop instead of jumping the PWM.
 constexpr uint32_t THROTTLE_RAMP_MAX_STEP_MS = 10;
 static_assert(THROTTLE_RAMP_UP_MS > 0 && THROTTLE_RAMP_DOWN_MS > 0, "Throttle ramp times must be nonzero");
@@ -68,7 +70,10 @@ uint32_t lastStatus = 0, lastBeat = 0, lastPrint = 0, lastCanAttempt = 0;
 uint32_t invalidFrames = 0;
 uint32_t throttleDutyScaled = 0, throttleRampAt = 0, throttleRampRemainder = 0;
 uint8_t throttleDuty = 0, throttleTarget = 0, throttleRampDirection = 0;
+uint32_t cruiseDutyScaled = 0;
+bool cruiseActive = false;
 RemoteDriveGate remoteGate;
+TractionMode tractionMode;
 uint32_t remotePeerAt=0, remoteSwitchAt=0, remoteCommandAt=0, lastRemoteStatus=0;
 uint32_t remoteSwitchSession=0;
 uint16_t remotePhysicalAdc=0, remoteSequence=0;
@@ -88,6 +93,8 @@ const char *pcmReason() {
     case 7: return "traction outputs disabled";
     case 8: return "reverse relays disabled";
     case 9: return "remote command missing/expired";
+    case 10: return "hill assist unavailable: chassis pitch required";
+    case 11: return "IMMOBILE: throttle held at idle";
     default: return "unknown";
   }
 }
@@ -110,6 +117,7 @@ void stopThrottle() {
   throttleRampDirection = 0;
   throttleDutyScaled = (uint32_t)throttleDuty * THROTTLE_DUTY_SCALE;
   throttleRampRemainder = 0;
+  cruiseActive = false;
   throttleRampAt = millis();
   // Also clear a successfully attached channel if the other failed setup.
   const bool firstOK = ledcWrite(MOTOR_1, throttleDuty);
@@ -154,10 +162,15 @@ void servicePowertrain() {
   const uint32_t now = millis();
   remoteGate.tick(now);
   const bool remote = remoteGate.phase != 0;
+  const bool remoteMode = (switchMask & SWITCH_REMOTE_MODE) != 0;
+  const uint8_t physicalSwitches=remoteSwitchSeen && now-remoteSwitchAt<DRIVE_LEASE_MS ? remoteSwitchMask : switchMask;
+  const bool hillSelected=(physicalSwitches&SWITCH_HILL_HOLD)!=0;
   if (!canReady || txFault) stopReason = 1;
   else if (!pwmReady) stopReason = 2;
-  else if (remote && (remoteGate.phase!=1 || !remoteCommandSeen || now-remoteCommandAt>=DRIVE_LEASE_MS ||
-      !remotePeerSeen || now-remotePeerAt>=DRIVE_LEASE_MS || !remoteSwitchSeen || now-remoteSwitchAt>=DRIVE_LEASE_MS)) stopReason = 9;
+  else if (hillSelected) stopReason = 10;
+  else if (remoteGate.phase==2 || remoteMode!=(remoteGate.phase==1) ||
+      (remote && (!remoteCommandSeen || now-remoteCommandAt>=DRIVE_LEASE_MS ||
+       !remotePeerSeen || now-remotePeerAt>=DRIVE_LEASE_MS || !remoteSwitchSeen || now-remoteSwitchAt>=DRIVE_LEASE_MS))) stopReason = 9;
   else if (!remote && (!accelSeen || now - accelAt >= ACCEL_TIMEOUT_MS)) stopReason = 3;
   else if (!remote && (!switchSeen || now - switchAt >= SWITCH_TIMEOUT_MS)) stopReason = 4;
   else if (!ENABLE_TRACTION_OUTPUTS) stopReason = 7;
@@ -167,8 +180,17 @@ void servicePowertrain() {
     // A fault after the first remote command ends ownership. Recovery needs a
     // new gesture/session; the host's continuing positive PWM cannot restart it.
     if (remoteGate.phase==1 && remoteCommandSeen) remoteGate.lock();
+    const bool modeSelectionIdle=((stopReason==9 && remoteMode && remoteGate.phase==0) || stopReason==10) &&
+      accelSeen && now-accelAt<ACCEL_TIMEOUT_MS && switchSeen && now-switchAt<SWITCH_TIMEOUT_MS &&
+      acceleratorADC<=DRIVE_IDLE_ADC;
     pedalArmed = false;
     stopThrottle();
+    // Remote mode blocks pedal throttle while idle, but still permits a
+    // stationary physical direction switch when the pedal is released.
+    if(modeSelectionIdle) {
+      const bool requestedReverse=(switchMask&SWITCH_REVERSE)!=0;
+      if(requestedReverse!=reverseOut) setReverseRelays(requestedReverse);
+    }
     // Hold the last applied direction on a fault; dropping reverse while
     // coasting would itself be an unrequested direction change.
     return;
@@ -190,11 +212,21 @@ void servicePowertrain() {
     stopReason = 0;
   }
 
+  if(!tractionMode.mobile) {
+    pedalArmed=false;stopReason=11;stopThrottle();return;
+  }
   if (pedalIdle) pedalArmed = true;
   if (!pedalArmed) { stopReason = 5; stopThrottle(); return; }
   if (remote) {
     rampThrottleDuty((uint32_t)driveThrottleDuty(remotePwm) * THROTTLE_DUTY_SCALE, now);
+  } else if (switchMask & SWITCH_CRUISE) {
+    if (!cruiseActive) {
+      cruiseDutyScaled = throttleDutyScaled;
+      cruiseActive = true;
+    }
+    rampThrottleDuty(cruiseDutyScaled, now);
   } else {
+    cruiseActive = false;
     rampThrottle(pedal, now);
   }
   // Evaluate both writes, even if one fails, so the other can be stopped.
@@ -210,6 +242,11 @@ void servicePowertrain() {
 
 void receivePowertrain(uint32_t id, uint8_t len, const uint8_t *data) {
   const uint32_t now = millis();
+  if(id==TRACTION_MODE_COMMAND_ID) {
+    if(!tractionMode.accept(data,len)) {++invalidFrames;return;}
+    // Neither MOBILE nor an old demand may restore pre-toggle throttle.
+    remotePwm=0;pedalArmed=false;stopThrottle();return;
+  }
   if (id==DRIVE_PEDAL_STATUS_ID && len==8 && driveStatusValid(data,4095)) {
     remotePhysicalAdc=data[1] | ((uint16_t)data[2]<<8);
     remotePeerSeen=true; remotePeerAt=now;
@@ -222,8 +259,9 @@ void receivePowertrain(uint32_t id, uint8_t len, const uint8_t *data) {
     if (!(data[1]&2) && data[0]==1) return;
     const uint32_t previous=remoteGate.session;
     const bool idle=remotePeerSeen && now-remotePeerAt<250 && remotePhysicalAdc<=DRIVE_IDLE_ADC;
+    const bool modeAllowsClaim=data[0]!=1 || (switchMask&SWITCH_REMOTE_MODE);
     const bool released=remoteSwitchSeen && now-remoteSwitchAt<250 && remoteSwitchNormal && remoteSwitchSession==remoteGate.session;
-    if (remoteGate.accept(data,len,1,idle,released,now) && remoteGate.session!=previous) {
+    if (remoteGate.accept(data,len,1,idle&&modeAllowsClaim,released,now) && remoteGate.session!=previous) {
       remoteCommandSeen=false; remotePwm=0; remoteSequence=0; pedalArmed=false;
     }
   } else if (id==DRIVE_PWM_ID) {
@@ -234,7 +272,7 @@ void receivePowertrain(uint32_t id, uint8_t len, const uint8_t *data) {
         !next || (remoteCommandSeen && (!advance || advance>=0x8000))) {
       remoteGate.lock(); remoteCommandSeen=false; return;
     }
-    remotePwm=data[0]; remoteReverse=data[1]; remoteSequence=next;
+    remotePwm=tractionMode.mobile?data[0]:0; remoteReverse=data[1]; remoteSequence=next;
     remoteCommandAt=now; remoteCommandSeen=true;
   }
   if (id == 0x301) {
@@ -254,14 +292,16 @@ void receivePowertrain(uint32_t id, uint8_t len, const uint8_t *data) {
 void sendPowertrainStatus() {
   const uint8_t data[8] = {
     (uint8_t)(throttleDuty > DRIVE_REST_PWM), (uint8_t)(throttleDuty > DRIVE_REST_PWM),
-    (uint8_t)reverseOut, throttleOut, 0, 0, 0, stopReason
+    (uint8_t)reverseOut, throttleOut, (uint8_t)cruiseActive, 0, 0, stopReason
   };
   txFault = !canSend(0x201, data);
   if (txFault) servicePowertrain();
 }
 
 void sendRemoteMotorStatus() {
-  uint8_t status[8]; remoteGate.status(status,throttleDuty);
+  uint8_t status[8];tractionMode.status(status,throttleDuty,stopReason);
+  if (!canSend(TRACTION_MODE_STATUS_ID,status)) { txFault=true; servicePowertrain(); }
+  remoteGate.status(status,throttleDuty);
   // The gate's direction is a requested remote direction, including while
   // manual mode is active. Report the applied relay command on both status IDs.
   status[0] = (status[0] & 0x7F) | (reverseOut ? 0x80 : 0);
@@ -298,7 +338,12 @@ void loop() {
     servicePowertrain();
   }
   const uint32_t now = millis();
-  if (!canReady && now - lastCanAttempt >= 1000) {
+  canService();
+  if(!canReady) {
+    remoteGate.lock(); accelSeen=false; switchSeen=false; txFault=true;
+    servicePowertrain();
+  }
+  if (!canReady && canRecovery.retryDue(now,lastCanAttempt)) {
     stopThrottle();
     canBegin(); lastCanAttempt = millis();
   }
@@ -315,10 +360,11 @@ void loop() {
     lastBeat = now;
     const uint8_t beat[8] = {2, (uint8_t)(stopReason == 0), (uint8_t)(now / 1000),
                            stopReason, canTxCount, canRxCount, 0, 0};
-    if (!canSend(0x600, beat)) { txFault = true; servicePowertrain(); }
+    if (!canSend(0x602, beat)) { txFault = true; servicePowertrain(); }
   }
   if (now - lastPrint >= 250) {
     lastPrint = now;
+    if(!canReady) canPrintStatus("Node 2 recovery");
     Serial.printf("Node 2 | ADC=%u/4095 corrected=%.3f V pedal=%u%% target=%u%% output=%u%% PWM=%u/255 reverse=%s GPIO33=%s GPIO26=%s | %s | invalid=%lu\n",
                   acceleratorADC, throttleVoltage(acceleratorADC), manualThrottlePercent(acceleratorADC),
                   throttleTarget, throttleOut, throttleDuty, reverseOut ? "ON" : "OFF",

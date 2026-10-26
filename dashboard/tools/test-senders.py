@@ -1,4 +1,4 @@
-"""Run the actual Node 1/3/4 sketches with mocked pins, CAN, radio, GPS and IMU."""
+"""Run the actual Node 1/3 sketches with mocked pins, CAN and radio."""
 from pathlib import Path
 import json
 import re
@@ -9,6 +9,7 @@ root = Path(__file__).resolve().parents[2]
 common = r'''
 #include <algorithm>
 #include "SwitchSignals.h"
+#include "CanRecovery.h"
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -28,8 +29,10 @@ uint32_t millis(){return clockMs;}
 void delay(unsigned n){clockMs+=n;}
 int pins[40]={};
 int pinModes[40]={};
-void pinMode(int pin,int mode){pinModes[pin]=mode;}
+int hornLatchAtOutput=-1;
+void pinMode(int pin,int mode){if(pin==13 && mode==OUTPUT)hornLatchAtOutput=pins[pin];pinModes[pin]=mode;}
 int digitalRead(int pin){return pins[pin];}
+void digitalWrite(int pin,int value){pins[pin]=value;}
 template<class T> T constrain(T value,T low,T high){return std::max(low,std::min(high,value));}
 struct SerialMock {
   std::deque<char> input;
@@ -55,7 +58,8 @@ Frame last(uint32_t id){
 }
 size_t count(uint32_t id){return std::count_if(outgoing.begin(),outgoing.end(),[&](const Frame &f){return f.id==id;});}
 bool canInitWorks=true,canModeWorks=true,canTxWorks=true;
-unsigned canInitCalls=0;
+unsigned canInitCalls=0,canAbortCalls=0;
+uint8_t canErrorFlags=0;
 struct MCP_CAN {
   explicit MCP_CAN(int cs){assert(cs==25);}
   int begin(int mode,int speed,int crystal){
@@ -63,6 +67,10 @@ struct MCP_CAN {
     ++canInitCalls;return canInitWorks?CAN_OK:2;
   }
   int setMode(int mode){assert(mode==MCP_NORMAL);return canModeWorks?CAN_OK:2;}
+  int getError(){return canErrorFlags;}
+  int errorCountTX(){return canErrorFlags?255:0;}
+  int errorCountRX(){return 0;}
+  int abortTX(){++canAbortCalls;return CAN_OK;}
   int checkReceive(){return incoming.empty()?0:CAN_MSGAVAIL;}
   int readMsgBuf(unsigned long *id,byte *len,byte *bytes){
     assert(!incoming.empty());auto f=incoming.front();incoming.pop_front();*id=f.id;*len=f.len;memcpy(bytes,f.data,8);return CAN_OK;
@@ -75,6 +83,8 @@ struct MCP_CAN {
 '''
 node1_io = r'''
 #define ESP_ARDUINO_VERSION_MAJOR 3
+using gpio_num_t=int;
+int gpio_set_level(gpio_num_t pin,int value){pins[pin]=value;return 0;}
 using portMUX_TYPE=int;
 #define portMUX_INITIALIZER_UNLOCKED 0
 void portENTER_CRITICAL(portMUX_TYPE*){}
@@ -100,6 +110,7 @@ void analogWrite(int pin,int value){
 node1 = r'''
 int main(){
   setup();assert(canReady && steeringRadioReady);
+  assert(pinModes[13]==OUTPUT && pins[13]==HORN_RELAY_OFF && hornLatchAtOutput==HORN_RELAY_OFF);
   IMUData packet={0,0};
   for(float angle : {-270.0f,-180.1f,180.1f,270.0f}) {
     packet.steeringAngle=angle; ++packet.sequence; clockMs+=50;
@@ -115,9 +126,15 @@ int main(){
   for(bool pressed : {false,true,false}) {
     SenderPacket sent={-269.5f,++packet.sequence,pressed}; clockMs+=50;
     onSteeringAngle(nullptr,(const uint8_t*)&sent,sizeof(sent)); loop();
+    assert(pins[13]==(pressed?HORN_RELAY_ON:HORN_RELAY_OFF));
+    assert(wirelessHornFrameValid(last(0x103).data) && last(0x103).data[0]==pressed);
     assert(steeringFeedback.angle==sent.steeringAngle && steeringFeedback.hornAvailable && steeringFeedback.hornPressed==pressed);
     assert(last(0x100).data[3]==1 && steeringAngleTenths(last(0x100).data)==-2695);
   }
+  IMUDataWithPitch extended={25,++packet.sequence,1,-9,1};clockMs+=50;
+  onSteeringAngle(nullptr,(const uint8_t*)&extended,sizeof(extended));loop();
+  assert(steeringFeedback.pitchAvailable && steeringFeedback.pitch==-9);
+  assert(last(WHEEL_PITCH_ID).data[3]==1 && steeringAngleTenths(last(WHEEL_PITCH_ID).data)==-90);
   assert(steeringFeedback.invalid==0);
   puts("IMU sender compatibility passed: old 8-byte and new 9-byte packed horn callback, channel 1, signed +/-270 degree CAN telemetry");
   // Exercise serial controls through the actual live loop and CAN handlers.
@@ -133,23 +150,23 @@ int main(){
   incoming.push_back(motion);loop();assert(!pins[32] && !pins[33]); // Old CAN token cannot resume.
   Serial.input.push_back('d');loop();assert(serialSteeringActive && pins[33]==60);
   canTxWorks=false;clockMs+=50;loop();assert(!serialSteeringActive && !pins[32] && !pins[33]);
-  canTxWorks=true;clockMs+=50;loop();assert(!pins[32] && !pins[33]);
+  canTxWorks=true;clockMs+=1000;loop();assert(canReady && !pins[32] && !pins[33]);
   puts("Live serial/CAN integration passed: pedal frames and output telemetry continue, serial ownership, CAN STOP, stale-token rejection and TX-fault stop");
   for(inputAdc=0;inputAdc<=4095;++inputAdc){
-    clockMs+=50;loop();const auto frame=last(0x301);
+    clockMs+=50;canRecovery.received(clockMs);loop();const auto frame=last(0x301);
     assert(frame.len==2 && frame.data[0]==uint8_t(inputAdc) && frame.data[1]==uint8_t(inputAdc>>8));
   }
   inputAdc=869;clockMs+=50;loop();
   const auto idle=last(0x301);assert(idle.data[0]==0x65 && idle.data[1]==3);
   const auto successful=txOK,failed=txFailed;
   canTxWorks=false;clockMs+=50;loop();assert(txFailed>failed && txOK==successful);
-  canTxWorks=true;clockMs+=50;loop();assert(lastSendOK && txOK>successful);
-  // Boundary at 0.8 V: ADC 992 may claim, 993 must be rejected.
-  for(int raw : {930,992,993}) {
+  canTxWorks=true;clockMs+=1000;loop();assert(lastSendOK && txOK>successful);
+  // Boundary at 1.0 V: ADC 1240 may claim, 1241 must be rejected.
+  for(int raw : {930,992,993,1100,1240,1241}) {
     driveGate=RemoteDriveGate{};inputAdc=raw;
     Frame probe{};probe.id=0x120;probe.len=8;probe.data[0]=1;probe.data[1]=2;
     probe.data[2]=98;probe.data[6]=1;incoming.push_back(probe);clockMs+=50;loop();
-    assert((driveGate.phase==1)==(raw<=992));
+    assert((driveGate.phase==1)==(raw<=1240));
   }
   driveGate=RemoteDriveGate{};inputAdc=0;clockMs+=50;loop();
   uint8_t claim[8]={1,2,99,0,0,0,1,0};
@@ -163,6 +180,14 @@ int main(){
   canInitWorks=true;clockMs=lastCanAttempt+1000;loop();
   assert(canReady && canInitCalls==attempts+1 && last(0x111).len==8);
   puts("Node 1 recovers a failed CAN startup and publishes steering status without rebooting");
+  driveGate.phase=1;driveGate.lastAt=clockMs;
+  websiteHorn.held=true;websiteHorn.lastCommandAt=clockMs;
+  serviceHornRelay();assert(hornRelayOn);
+  canErrorFlags=0x20;clockMs+=100;serviceCanHealth();
+  assert(!canReady && driveGate.phase==2 && !websiteHorn.held && !hornRelayOn && !pins[32] && !pins[33]);
+  canErrorFlags=0;clockMs=canRecovery.faultAt+1000;loop();
+  assert(canReady && driveGate.phase==2 && !websiteHorn.held);
+  puts("Node 1 runtime CAN recovery passed: bus-off stops website horn and motion, aborts TX, resets controller and keeps old ownership locked");
 }
 '''
 node3 = r'''
@@ -193,6 +218,7 @@ int main(){
   for(int bit=0;bit<6;++bit)assert(switchPins[bit]==expectedPins[bit] && pinModes[expectedPins[bit]]==INPUT_PULLUP);
   for(unsigned mask=0;mask<64;++mask) {
     clockMs+=30;
+    canRecovery.received(clockMs); // Other active nodes still send periodic frames.
     for(int bit=0;bit<6;++bit)pins[expectedPins[bit]]=(mask&(1U<<bit))?LOW:HIGH;
     loop();clockMs+=25;loop();
     const auto actual=last(0x300);assert(actual.len==1 && actual.data[0]==mask);
@@ -204,96 +230,36 @@ int main(){
     clockMs+=10;pins[expectedPins[bit]]=LOW;loop();
     clockMs+=25;loop();assert(buildPayload()==63);
   }
-  // A failed TX remains pending; it must not reset the CAN controller.
+  // A failed TX aborts queued frames and backs off before controller recovery.
   const auto calls=canInitCalls;const auto failed=txFailed;sent=count(0x300);
   canTxWorks=false;sendPending=true;++clockMs;loop();
-  assert(sendPending && txFailed>failed && count(0x300)==sent && canInitCalls==calls);
-  canTxWorks=true;++clockMs;loop();assert(!sendPending && count(0x300)==sent+1);
+  assert(sendPending && txFailed>failed && count(0x300)==sent && canInitCalls==calls && !canReady && canAbortCalls);
+  canTxWorks=true;clockMs+=1000;loop();assert(canReady);
+  ++clockMs;loop();assert(!sendPending && count(0x300)==sent+1);
   canInitWorks=false;initializeCAN();assert(!canReady);
   const auto attempts=canInitCalls;clockMs+=999;loop();assert(canInitCalls==attempts);
   canInitWorks=true;++clockMs;loop();assert(canReady && canInitCalls==attempts+1);
   canModeWorks=false;initializeCAN();assert(!canReady);
   canModeWorks=true;clockMs+=1000;loop();assert(canReady);
+  // Bus-off after a successful boot must stop ownership, abort old frames,
+  // and recover without rebooting the ESP32 or resuming the old session.
+  driveGate.phase=1;driveGate.lastAt=clockMs;
+  canErrorFlags=0x20;clockMs+=100;loop();
+  assert(!canReady && driveGate.phase==2 && canRecovery.reason==2);
+  const auto resets=canInitCalls;canErrorFlags=0;clockMs=canRecovery.faultAt+999;loop();assert(canInitCalls==resets);
+  clockMs=canRecovery.faultAt+1000;loop();assert(canReady && canInitCalls==resets+1 && driveGate.phase==2);
+  puts("Node 3 runtime CAN recovery passed: bus-off, queued-TX abort, backoff, reset and ownership remains locked");
   puts("Node 3 sender tests passed: exact GPIOs, all 64 switch masks, bounce, DLC1, 1 s refresh, TX retry, init/mode recovery, gate telemetry, ownership expiry and reverse handoff");
 }
 '''
-node4_io = r'''
-bool canReady=false,imuPresent=true,imuSampleOK=true;
-uint8_t canTxCount=0,canRxCount=0;
-bool canBegin(){canReady=true;return true;}
-void canPrintStatus(const char*){}
-template<size_t N>bool canSend(uint32_t id,const uint8_t(&bytes)[N]){
-  Frame f{};f.id=id;f.len=N;memcpy(f.data,bytes,N);outgoing.push_back(f);++canTxCount;return true;
-}
-bool canRead(uint32_t &id,uint8_t &len,uint8_t(&bytes)[8]){
-  if(incoming.empty())return false;
-  auto f=incoming.front();incoming.pop_front();id=f.id;len=f.len;memcpy(bytes,f.data,8);++canRxCount;return true;
-}
-void canHeartbeat(uint8_t node,uint8_t status,uint8_t error){
-  uint8_t d[8]={node,status,(uint8_t)(millis()/1000),error,canTxCount,canRxCount,0,0};canSend(0x600,d);
-}
-struct HardwareSerial {
-  explicit HardwareSerial(int){}
-  void setRxBufferSize(unsigned){}
-  void begin(int,int,int,int){}
-  int available(){return 0;}
-  int read(){return 0;}
-};
-struct TinyGPSPlus {
-  struct Location {
-    bool valid=true;uint32_t ageMs=0;double latitude=10.99999,longitude=79.99999;
-    bool isValid(){return valid;}uint32_t age(){return ageMs;}
-    double lat(){return latitude;}double lng(){return longitude;}
-  } location;
-  struct Satellites {bool isValid(){return true;}uint32_t value(){return 14;}} satellites;
-  void encode(int){}
-};
-struct sensors_event_t {struct {float x=0,y=0,z=0;} acceleration;};
-constexpr int MPU6050_RANGE_8_G=0,MPU6050_BAND_21_HZ=0;
-struct Adafruit_MPU6050 {
-  bool begin(uint8_t){return imuPresent;}
-  void setAccelerometerRange(int){}void setFilterBandwidth(int){}
-  bool getEvent(sensors_event_t *a,sensors_event_t*,sensors_event_t*){
-    a->acceleration.x=-1;a->acceleration.z=1;return imuSampleOK;
-  }
-};
-struct WireMock {void begin(int,int){}void setTimeOut(int){}} Wire;
-'''
-node4 = r'''
-int main(){
-  setup();pins[34]=HIGH;clockMs=1000;loop();
-  auto p=last(0x400);assert(p.len==8 && p.data[6]==1 && p.data[7]==12);
-  assert(p.data[0]==11 && p.data[1]==0 && p.data[2]==0);
-  assert(p.data[3]==80 && p.data[4]==0 && p.data[5]==0); // Degree-boundary carry.
-  assert(last(0x401).data[0]==1 && last(0x401).data[2]==0);
-  clockMs=2000;loop();assert(last(0x401).data[1]==0 && last(0x401).data[2]==1);
-  push(0x300,{2});clockMs=2001;loop();clockMs=2050;loop();
-  auto h=last(0x500);assert(h.data[0]==1 && h.data[1]==135 && h.data[2]==0 && h.data[3]==1);
-  clockMs=5001;loop();assert(last(0x500).data[0]==1); // One-second switch refresh is allowed.
-  clockMs=5501;loop();assert(last(0x500).data[0]==0);
-  push(0x300,{0x42});clockMs=5502;loop();assert(!switchSeen);
-  push(0x300,{8});++clockMs;loop();assert(switchSeen && !hillRequest); // Remote mode is not HillHold.
-  push(0x300,{0x82});++clockMs;loop();assert(!switchSeen);
-  gps.location.latitude=-10;clockMs=6501;loop();assert(!last(0x400).data[6]);
-  gps.location.latitude=90;gps.location.longitude=180;clockMs=7501;loop();
-  p=last(0x400);assert(p.data[0]==90 && p.data[3]==180 && p.data[6]==1);
-  gps.location.ageMs=3000;clockMs=8501;imuSampleOK=false;loop();
-  assert(!last(0x400).data[6] && !last(0x500).data[3]);
-  const auto beat=last(0x600);assert(beat.data[0]==4 && beat.data[1]==0 && beat.data[3]==2);
-  for(int n=0;n<20;++n) { push(0x777,{0}); }
-  loop();assert(incoming.size()==12);
-  puts("Node 4 sender tests passed: GPS degree carry/domain/age, ignition BE16, pitch encoding, switch expiry, invalid inputs, heartbeat and bounded RX");
-}
-'''
-
 with tempfile.TemporaryDirectory() as directory:
     tmp = Path(directory)
-    for name, io, scenario in [('node1_bcm', node1_io, node1), ('node3_ccm', '', node3), ('node4_tcu', node4_io, node4)]:
+    for name, io, scenario, polarity in [('node1_bcm', node1_io, node1,0), ('node1_bcm',node1_io,node1,1), ('node3_ccm', '', node3,0)]:
         source = (root / name / f'{name}.ino').read_text()
         source = re.sub(r'^#include (?:<.*>|"CanCommon.h")\s*$', '', source, flags=re.M)
         cpp = tmp / f'{name}.cpp'
         cpp.write_text(common + io + source + scenario)
-        subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-I', str(root / name), str(cpp), '-o', str(tmp / name)], check=True)
+        subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', f'-DNODE1_HORN_ACTIVE_LOW={polarity}', '-I', str(root / name), str(cpp), '-o', str(tmp / name)], check=True)
         subprocess.run([str(tmp / name)], check=True)
 
     # Compare every ADC value across the actual firmware and browser functions.

@@ -1,10 +1,12 @@
+import HornButton from './HornButton.jsx'
+import MobilityButton from './MobilityButton.jsx'
 import { useEffect, useRef, useState } from 'react'
 import { createSteeringClient } from './steeringClient'
 import { createDriveClient } from './driveClient'
 import { display } from './diagnostics'
 
-export default function ButtonControls({ onClose, onJoystick }) {
-  const control=useRef(null),driveControl=useRef(null),pointers=useRef({steer:null,throttle:null})
+export default function ButtonControls({ onClose, onJoystick, mobility, onToggleMobility }) {
+  const horn=useRef(null),control=useRef(null),driveControl=useRef(null),pointers=useRef({steer:null,throttle:null})
   const keyboard=useRef({steer:null,throttle:null})
   const [state,setState]=useState({ready:false,held:0,direction:null,pwm:null,message:'CONNECTING'})
   const [drive,setDrive]=useState({ready:false,held:false,active:false,adc:0,reverse:false,canShift:false,message:'CONNECTING'})
@@ -23,11 +25,13 @@ export default function ButtonControls({ onClose, onJoystick }) {
       document.removeEventListener('visibilitychange',hidden);document.removeEventListener('keydown',keydown)
     }
   },[onClose])
+  useEffect(()=>{if(drive.remoteMode===false){control.current?.stop();driveControl.current?.stop()}},[drive.remoteMode])
+  useEffect(()=>{driveControl.current?.setMobile(mobility.mobile===true&&!mobility.pending)},[mobility.mobile,mobility.pending])
   const channelControl=channel=>channel==='steer'?control.current:driveControl.current
   const release=channel=>{pointers.current[channel]=null;keyboard.current[channel]=null;channelControl(channel)?.stop()}
   const releasePointer=(event,channel)=>{if(pointers.current[channel]===event.pointerId)release(channel)}
   const releaseKeyboard=channel=>{if(keyboard.current[channel]!==null)release(channel)}
-  const stop=()=>{release('steer');release('throttle')}
+  const stop=()=>{release('steer');release('throttle');horn.current?.stop()}
   const down=(event,channel,value)=>{
     event.preventDefault()
     if(event.button!==0)return
@@ -56,7 +60,7 @@ export default function ButtonControls({ onClose, onJoystick }) {
   </button>
   return <div className="control-page">
     <header className="topbar"><span className="wordmark">SRT</span><div className="top-actions"><button className="button" onClick={()=>{stop();onJoystick()}}>JOYSTICK ↗</button><a className="button" href="/" onClick={stop}>DASHBOARD ↗</a></div></header>
-    <main className="steering-console remote-console" aria-label="Remote control"><div className="remote-heading"><h1>Control</h1><span className="caps muted">HOLD · MAX 5 s</span></div>
+    <main className="steering-console remote-console" aria-label="Remote control">{drive.remoteMode===true?<><div className="remote-heading"><h1>Control</h1><span className="caps muted">THROTTLE · RELEASE TO STOP</span></div>
       <div className="remote-grid"><section className="remote-steering" aria-label="Steering">
         <div className="remote-label"><span className="caps">STEERING</span><span className="caps muted">PWM 60</span></div>
         <div className="remote-reading"><span>CURRENT ANGLE</span><strong>{state.angleAvailable ? display(state.angleDeg,1,'°') : '—'}</strong></div>
@@ -65,15 +69,16 @@ export default function ButtonControls({ onClose, onJoystick }) {
       </section><section className="remote-throttle" aria-label="Throttle">
         <div className="remote-label"><label htmlFor="drive-level" className="caps">THROTTLE LEVEL</label><strong>{level}%</strong></div>
         <input id="drive-level" type="range" min="0" max="100" step="5" value={level} disabled={drive.held||drive.active} onChange={event=>setLevel(Number(event.target.value))} aria-valuetext={`${level} percent throttle above idle`} />
-        <div className="traction-buttons"><button className={`steering-turn throttle-hold ${drive.held?'pressed':''}`} disabled={!drive.held&&(!drive.ready||drive.active||drive.shifting||level===0)} aria-label="Hold throttle to move" aria-pressed={drive.held} onPointerDown={event=>down(event,'throttle',level)} onPointerUp={event=>releasePointer(event,'throttle')} onPointerCancel={event=>releasePointer(event,'throttle')}
+        <div className="traction-buttons"><button className={`steering-turn throttle-hold ${drive.held?'pressed':''}`} disabled={mobility.mobile!==true||mobility.pending||(!drive.held&&(!drive.ready||drive.active||drive.shifting||level===0))} aria-label="Hold throttle to move" aria-pressed={drive.held} onPointerDown={event=>down(event,'throttle',level)} onPointerUp={event=>releasePointer(event,'throttle')} onPointerCancel={event=>releasePointer(event,'throttle')}
     onLostPointerCapture={event=>releasePointer(event,'throttle')} onPointerMove={event=>move(event,'throttle')} onContextMenu={event=>event.preventDefault()}
     onKeyDown={event=>keys(event,'throttle',level)} onKeyUp={event=>keyUp(event,'throttle')}
     onBlur={()=>releaseKeyboard('throttle')}><span aria-hidden="true">↑</span>THROTTLE</button>
           <button className={`button reverse-select ${drive.reverse?'selected':''}`} disabled={!drive.ready||!drive.canShift||drive.held||drive.active||drive.shifting} aria-pressed={drive.reverse} onClick={()=>driveControl.current?.reverse()}>REVERSE<span>{drive.shifting?'SWITCHING':drive.appliedReverse===null?'—':(drive.appliedReverse??drive.reverse)?'ON':'OFF'}</span></button></div>
         <div className="remote-reading"><span>COMMAND {drive.throttlePwm??0} / 255 · PWM {drive.appliedThrottlePwm??'—'}</span><span role="status">{drive.message}</span></div>
       </section></div>
-      <button className="button steering-stop remote-stop" onPointerDown={stop} onClick={event=>{if(event.detail===0)stop()}}>STOP</button>
-      <p className="caps muted remote-hint">RELEASE TO IDLE · 0.8 V IDLE SIGNAL · SHIFT ONLY WHEN STATIONARY</p>
+      <HornButton ref={horn}/>
+      <p className="caps muted remote-hint">RELEASE TO IDLE · 0.8 V IDLE SIGNAL · SHIFT ONLY WHEN STATIONARY</p></>:<section className="remote-mode-gate" role="status"><span className="caps">{drive.remoteMode===false?'REMOTE MODE OFF':'WAITING FOR SWITCH STATUS'}</span><h1>Turn on the physical REMOTE MODE switch</h1><p>Mobile steering, throttle and horn are disabled until Node 3 reports remote mode on.</p></section>}
+      <MobilityButton state={mobility} onToggle={onToggleMobility} className="button-mobility"/>
     </main>
   </div>
 }

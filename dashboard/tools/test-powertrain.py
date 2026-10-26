@@ -12,6 +12,8 @@ shim = r'''
 #include <cstring>
 #include <deque>
 #include <vector>
+#include "CanRecovery.h"
+#include "TractionMode.h"
 constexpr int LOW=0, HIGH=1, OUTPUT=1;
 uint32_t clockMs=0;
 uint32_t millis() { return clockMs; }
@@ -21,6 +23,9 @@ struct SerialMock {
   template<class... T> void printf(const char*, T...) {}
 } Serial;
 bool canReady=true, txWorks=true, writesWork=true, firstAttach=true, secondAttach=true;
+CanRecovery canRecovery;
+void canService() {}
+void canPrintStatus(const char*) {}
 uint8_t canTxCount=0, canRxCount=0;
 int pins[40]={}, pwm[40]={}, pinModes[40]={};
 void pinMode(int pin,int mode) {
@@ -72,6 +77,7 @@ void reset() {
   accelAt=switchAt=lastStatus=lastBeat=lastPrint=lastCanAttempt=0;
   invalidFrames=0; canTxCount=canRxCount=0; incoming.clear(); outgoing.clear();
   remoteGate=RemoteDriveGate{}; remotePeerSeen=remoteSwitchSeen=remoteCommandSeen=false;
+  tractionMode=TractionMode{};
   remotePeerAt=remoteSwitchAt=remoteCommandAt=lastRemoteStatus=0;remotePwm=0;remoteSequence=0;
   setup(); assert(pwm[13]==(ENABLE_TRACTION_OUTPUTS?62:0) && pwm[14]==pwm[13] && pins[26]==HIGH && pins[33]==HIGH);
 }
@@ -107,7 +113,9 @@ void resumeFull() { switches(0); pedal(0); keep(clockMs+THROTTLE_RAMP_UP_MS,4095
 uint16_t remoteTestSeq=0;
 void remoteInputs(uint8_t duty,bool rev=false,uint16_t physical=0,uint8_t mask=0) {
   uint8_t p[8]={1,(uint8_t)physical,(uint8_t)(physical>>8),0xD1,99,0,0,0};
-  uint8_t s[8]={1,mask,0,0xD1,99,0,0,0};
+  const uint8_t physicalSwitches=SWITCH_REMOTE_MODE|mask;
+  receivePowertrain(0x300,1,&physicalSwitches);
+  uint8_t s[8]={1,physicalSwitches,0,0xD1,99,0,0,0};
   receivePowertrain(0x121,8,p);receivePowertrain(0x122,8,s);
   ++remoteTestSeq;
   uint8_t gate[8]={1,(uint8_t)(2|rev),99,0,0,0,(uint8_t)remoteTestSeq,(uint8_t)(remoteTestSeq>>8)};
@@ -144,7 +152,7 @@ int main() {
   puts("Working-code compatibility passed: all 4096 physical ADC values match max(62, original PWM), preserving the 0.8 V idle minimum");
   reset();inputs(0,4095);assert(stopReason==5);
   pedal(868); assert(pedalArmed); pedal(4095); assertStopped();
-  // One full-scale jump becomes a linear 1000 ms PWM ramp, independent of
+  // One full-scale jump becomes a linear configured-time PWM ramp, independent of
   // how many times the control function is called within one millisecond.
   int previous=62;
   for(uint32_t n=1;n<=THROTTLE_RAMP_UP_MS;++n) {
@@ -170,21 +178,42 @@ int main() {
   }
   assertStopped(); assert(pedalArmed && stopReason==0);
 
-  reset(); inputs(0,0); keep(500,2000);
+  // Cruise captures the currently applied output and ignores later pedal changes.
+  reset();inputs(0,0);keep(300,2000);const uint8_t cruisePwm=pwm[13];
+  switches(SWITCH_CRUISE);assert(cruiseActive && pwm[13]==cruisePwm);
+  keep(clockMs+350,4095,SWITCH_CRUISE);assert(cruiseActive && pwm[13]==cruisePwm);
+  sendPowertrainStatus();assert(outgoing.back().data[4]==1);
+  switches(0);assert(!cruiseActive);keep(clockMs+200,4095);assert(pwm[13]>cruisePwm);
+
+  // Remote mode blocks the physical pedal until a remote owner claims the gate.
+  reset();inputs(0,0);switches(SWITCH_REMOTE_MODE);assertStopped() ;assert(stopReason==9);
+  switches(SWITCH_REMOTE_MODE|SWITCH_REVERSE);assertStopped();assert(reverseOut && stopReason==9);
+  switches(SWITCH_REMOTE_MODE);assertStopped();assert(!reverseOut && stopReason==9);
+  pedal(4095);assertStopped();assert(stopReason==9);
+  remoteTestSeq=0;remoteInputs(0);assert(remoteGate.phase==1 && stopReason==0);
+  keepRemote(clockMs+100,120);const int heldRemotePwm=pwm[13];
+  pedal(4095);assert(pwm[13]==heldRemotePwm && stopReason==0);
+  switches(0);assertRemoteIdle();assert(remoteGate.phase==2 && stopReason==9);
+
+  reset(); inputs(0,0); keep(THROTTLE_RAMP_UP_MS,2000);
   assert(acceleratorADC==2000 && throttleOut==48 && pwm[13]==122);
-  keep(600,2000); assert(pwm[13]==122); // Exact working receiver target, without overshoot.
+  keep(clockMs+100,2000); assert(pwm[13]==122); // Exact working receiver target, without overshoot.
   full(); pedal(2000); assert(pwm[13]==255);
   keep(clockMs+100,2000); assert(pwm[13]==206 && throttleTarget==48);
-  pedal(4095); assert(pwm[13]==206); keep(clockMs+333,4095); assert(pwm[13]==255);
-  // Every non-direction request is indication only; HillHold must not act as ECO.
-  for(uint8_t bit=0;bit<5;++bit) {
-    switches(1U<<bit); assert(pwm[13]==255 && throttleTarget==100 && !reverseOut);
+  pedal(4095); assert(pwm[13]==206); keep(clockMs+THROTTLE_RAMP_UP_MS,4095); assert(pwm[13]==255);
+  // Autonomous and horn remain indications; unavailable hill selection blocks drive.
+  for(uint8_t bit : {SWITCH_AUTONOMOUS,SWITCH_HORN}) {
+    switches(bit); assert(pwm[13]==255 && throttleTarget==100 && !reverseOut);
   }
-  keep(clockMs+240,4095,0x1f); assert(throttleOut==100 && pwm[13]==255);
+  keep(clockMs+240,4095,SWITCH_HILL_HOLD|SWITCH_AUTONOMOUS|SWITCH_HORN);
+  assertStopped();assert(stopReason==10 && !pedalArmed);
   sendPowertrainStatus(); const auto s=outgoing.back();
-  assert(s.id==0x201 && s.len==8 && s.data[0]==1 && s.data[1]==1);
-  assert(s.data[2]==0 && s.data[3]==100 && s.data[4]==0 && s.data[5]==0 && s.data[6]==0);
-  keep(clockMs+400,0,0x1f); assertStopped(); // Requests cannot add throttle.
+  assert(s.id==0x201 && s.len==8 && s.data[0]==0 && s.data[1]==0);
+  assert(s.data[2]==0 && s.data[3]==24 && s.data[4]==0 && s.data[5]==0 && s.data[6]==0 && s.data[7]==10);
+  keep(clockMs+400,0,SWITCH_HILL_HOLD|SWITCH_AUTONOMOUS|SWITCH_HORN); assertStopped(); // Requests cannot add throttle.
+
+  pedal(4095);switches(0);assertStopped();assert(stopReason==5);
+  pedal(0);assert(stopReason==0); // Leaving blocked hill mode still requires release.
 
   // Irregular 1..9 ms scheduling gives the same ramp as the 1 ms loop.
   reset(); inputs(0,0); pedal(4095);
@@ -286,27 +315,27 @@ int main() {
     loop();
   }
   assert(pwm[13]==255);
-  clockMs=2000; incoming.push_back({0x301,2,{0,0}}); loop();
-  assert(outgoing.back().id==0x600 && outgoing.back().data[0]==2);
-  for(uint16_t idleAdc : {869,930,992,993}) {
+  clockMs+=1000; incoming.push_back({0x301,2,{0,0}}); loop();
+  assert(outgoing.back().id==0x602 && outgoing.back().data[0]==2);
+  for(uint16_t idleAdc : {869,930,992,993,1100,1240,1241}) {
     reset();inputs(0,idleAdc);remoteTestSeq=0;remoteInputs(0,false,idleAdc);
-    assert((remoteGate.phase==1)==(idleAdc<=992));
+    assert((remoteGate.phase==1)==(idleAdc<=1240));
   }
   // Actual joystick protocol: all 256 demand values map above the idle baseline.
   reset();inputs(0,0);remoteTestSeq=0;remoteInputs(0);assert(remoteGate.phase==1 && pedalArmed);
-  keepRemote(1000,180);assert(pwm[13]==198 && throttleDuty==198);
-  keepRemote(1400,0);assertRemoteIdle();
-  for(int duty=0;duty<=255;++duty){keepRemote(clockMs+10,duty);assert(pwm[13]==62+(193*duty)/255);}
+  keepRemote(THROTTLE_RAMP_UP_MS,180);assert(pwm[13]==198 && throttleDuty==198);
+  keepRemote(clockMs+THROTTLE_RAMP_DOWN_MS,0);assertRemoteIdle();
+  for(int duty=0;duty<=255;++duty){keepRemote(clockMs+(THROTTLE_RAMP_UP_MS+192)/193,duty);assert(pwm[13]==62+(193*duty)/255);}
   keepRemote(clockMs+400,180,false,4095);assert(pwm[13]==198 && remoteGate.phase==1);
   // Physical input frames cannot override either throttle or direction.
-  pedal(4095);switches(SWITCH_REVERSE);assert(pwm[13]==198 && !reverseOut && remoteGate.phase==1);
-  keepRemote(clockMs+1000,255,false,4095,2);assert(pwm[13]==255); // HillHold never caps PWM.
+  pedal(4095);switches(SWITCH_REMOTE_MODE|SWITCH_REVERSE);assert(pwm[13]==198 && !reverseOut && remoteGate.phase==1);
+  keepRemote(clockMs+1000,255,false,4095);assert(pwm[13]==255);
   // Remote direction still requires a zero command, then switches immediately.
   remoteInputs(180,true,4095);assert(!reverseOut && stopReason==6);assertRemoteIdle();
   const uint32_t shiftStart=clockMs;remoteInputs(0,true,4095);
   assert(clockMs==shiftStart && reverseOut && pins[33]==LOW && pins[26]==LOW);
   assertReverseStatus(true);
-  keepRemote(clockMs+1000,180,true,4095);assert(pwm[13]==198);
+  keepRemote(clockMs+THROTTLE_RAMP_UP_MS,180,true,4095);assert(pwm[13]==198);
   // Expiry latches the electrical idle signal even with a fully pressed physical pedal.
   clockMs+=350;servicePowertrain();assertRemoteIdle();assert(remoteGate.phase==2 && stopReason==9);
   pedal(4095);switches(0);assertRemoteIdle();
@@ -317,9 +346,9 @@ int main() {
   reset();inputs(0,869);remoteTestSeq=0;remoteInputs(0);keepRemote(400,0);assertRemoteIdle();
   const uint32_t riseAt=clockMs;
   int remotePrevious=pwm[13];
-  for(unsigned n=1;n<=1000;++n) {
+  for(unsigned n=1;n<=THROTTLE_RAMP_UP_MS;++n) {
     keepRemote(riseAt+n,255);
-    const int expected=62+(n*193/1000); // Same bounded electrical slew as pedal mode.
+    const int expected=62+(n*193/THROTTLE_RAMP_UP_MS); // Same bounded electrical slew as pedal mode.
     assert(pwm[13]==(expected>255?255:expected));
     assert(pwm[13]>=remotePrevious && pwm[13]-remotePrevious<=1);
     remotePrevious=pwm[13];
@@ -327,6 +356,10 @@ int main() {
   // A latched command cannot return a positive demand when the lease expires.
   clockMs+=350;servicePowertrain();assertRemoteIdle();assert(remoteGate.phase==2);
   txWorks=false;sendPowertrainStatus();assertStopped(); // CAN loss also retains the 0.8 V idle output.
+  reset();inputs(0,0);remoteTestSeq=0;remoteInputs(0);keepRemote(100,180);
+  remoteInputs(180,false,4095,SWITCH_HILL_HOLD);servicePowertrain();
+  assertRemoteIdle();assert(remoteGate.phase==2 && stopReason==10);
+  puts("Unavailable hill mode passed: pedal ignored at idle, remote drive cancelled, explicit pedal release needed to resume");
   puts("Joystick motor tests passed: all 256 demand values mapped above idle, physical pedal/switch blocking, HillHold indication, active-low reversal, lease expiry and idle-only handback");
   puts("Node 2 receiver/output tests passed: linear up/down PWM, target changes, loop jitter/stalls, applied-output telemetry, six switch signals, CAN layouts, idle recovery, reverse timing, immediate faults, heartbeat and clock wrap");
 }

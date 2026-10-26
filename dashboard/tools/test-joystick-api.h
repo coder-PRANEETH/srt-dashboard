@@ -2,7 +2,7 @@
 void testJoystick() {
   RemoteDriveGate pedalGate,switchGate,motorGate;
   SteeringControl steeringNode; // No angle sensor: motor-speed control still works.
-  uint16_t physical=0;uint8_t physicalSwitches=SWITCH_AUTONOMOUS,motorDuty=DRIVE_REST_PWM;uint16_t lastMotorSeq=0;
+  uint16_t physical=0;uint8_t physicalSwitches=SWITCH_REMOTE_MODE|SWITCH_AUTONOMOUS,motorDuty=DRIVE_REST_PWM;uint16_t lastMotorSeq=0;
   size_t delivered=outgoing.size();bool motorClaimed=false;
   auto bus=[&]() {
     while(delivered<outgoing.size()) {
@@ -25,6 +25,7 @@ void testJoystick() {
     pedalGate.status(p.data,physical);switchGate.status(s.data,physicalSwitches);motorGate.status(m.data,motorDuty);
     steeringNode.status(st.data);angle.data[3]=0;angle.data[2]=255;
     out.data[2]=motorGate.reverse;out.data[7]=0;
+    push(0x300,{physicalSwitches});
     incoming.push_back(p);incoming.push_back(s);incoming.push_back(m);incoming.push_back(st);incoming.push_back(angle);incoming.push_back(out);readCan();
   };
   auto command=[&](uint16_t seq,uint8_t throttle,uint8_t direction,uint8_t pwm,bool reverse=false) {
